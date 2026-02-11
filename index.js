@@ -4,7 +4,6 @@ const app = express();
 app.use(express.json({ limit: "1mb" }));
 
 // ===== CONFIG =====
-// Em produção, NÃO queremos fallback fraco. No Render você já criou ATTENDANT_API_KEY.
 const API_KEY = process.env.ATTENDANT_API_KEY;
 
 // In-memory store (temporário)
@@ -13,7 +12,7 @@ const ORDERS = new Map(); // orderId -> order
 function requireApiKey(req, res, next) {
   const key = req.header("X-API-Key");
 
-  // Se não houver chave configurada no ambiente, mostre erro claro (para você ajustar no Render)
+  // Se não houver chave configurada no ambiente, mostre erro claro
   if (!API_KEY) {
     return res.status(500).json({
       error: "ServerMisconfigured",
@@ -27,6 +26,7 @@ function requireApiKey(req, res, next) {
       message: "API Key inválida ou ausente"
     });
   }
+
   next();
 }
 
@@ -38,7 +38,9 @@ function validateOrderBody(body) {
   const errors = [];
 
   if (!body || typeof body !== "object") errors.push("Body inválido.");
-  if (!body.channel || !["site", "whatsapp"].includes(body.channel)) errors.push("channel deve ser 'site' ou 'whatsapp'.");
+  if (!body.channel || !["site", "whatsapp"].includes(body.channel)) {
+    errors.push("channel deve ser 'site' ou 'whatsapp'.");
+  }
 
   const c = body.customer;
   if (!c || typeof c !== "object") errors.push("customer é obrigatório.");
@@ -47,8 +49,9 @@ function validateOrderBody(body) {
     if (!c.phone || typeof c.phone !== "string") errors.push("customer.phone é obrigatório.");
   }
 
-  if (!Array.isArray(body.items) || body.items.length < 1) errors.push("items deve ter pelo menos 1 item.");
-  else {
+  if (!Array.isArray(body.items) || body.items.length < 1) {
+    errors.push("items deve ter pelo menos 1 item.");
+  } else {
     body.items.forEach((it, i) => {
       if (!it.itemId) errors.push(`items[${i}].itemId é obrigatório.`);
       if (!it.name) errors.push(`items[${i}].name é obrigatório.`);
@@ -70,6 +73,17 @@ app.get("/meta", (req, res) => {
     storeName: "Pappi Pizza",
     menuUrl: "https://app.cardapioweb.com/pappi_pizza?s=dony",
     whatsappNumbers: ["+55 19 98319-3999", "+55 19 98227-5105"]
+  });
+});
+
+// ✅ DEBUG (temporário) — confirma se o header está chegando
+app.get("/debug-auth", (req, res) => {
+  const key = req.header("X-API-Key") || "";
+  res.json({
+    hasEnvKey: Boolean(process.env.ATTENDANT_API_KEY),
+    envKeyLength: (process.env.ATTENDANT_API_KEY || "").length,
+    hasHeaderKey: Boolean(key),
+    headerKeyLength: key.length
   });
 });
 
@@ -101,7 +115,6 @@ app.post("/orders", requireApiKey, (req, res) => {
   };
 
   ORDERS.set(orderId, order);
-
   return res.status(201).json(order);
 });
 
@@ -148,4 +161,3 @@ app.post("/checkout/whatsapp", requireApiKey, (req, res) => {
 // ===== Render PORT =====
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("🔥 Pappi API rodando na porta", PORT));
-

@@ -367,3 +367,4 @@ app.post("/checkout/whatsapp", requireApiKey, (req, res) => {
 // ===== START =====
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("🔥 Pappi API rodando na porta", PORT));
+

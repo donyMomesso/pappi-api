@@ -1,8 +1,16 @@
 {
   "name": "pappi-api",
   "version": "1.0.0",
+  "description": "Pappi Pizza Actions API PRO",
   "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
-    "express": "^4.18.2"
+    "express": "^4.19.2",
+    "swagger-ui-express": "^5.0.1"
   }
 }

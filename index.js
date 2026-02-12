@@ -1,24 +1,41 @@
-/**
- * Pappi Pizza Actions API (PRO) + WhatsApp Cloud API Webhook
- * - Public:   GET /health, GET /meta, GET /openapi.json (opcional), GET /debug-auth
- * - Protected (X-API-Key): POST /orders, GET /orders, GET /orders/:orderId, POST /checkout/whatsapp
- * - WhatsApp: GET /webhook (verify), POST /webhook (receive messages)
- */
-
 const express = require("express");
-
 const app = express();
+
 app.use(express.json({ limit: "2mb" }));
 
-// ===== ENV =====
-const ATTENDANT_API_KEY = process.env.ATTENDANT_API_KEY; // chave das atendentes (X-API-Key)
-const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN; // token de verificação do webhook
-const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN; // bearer token do WhatsApp Cloud API
-const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID; // phone_number_id (Meta)
+/**
+ * =========================
+ * ENV / CONFIG
+ * =========================
+ */
+const ATTENDANT_API_KEY = process.env.ATTENDANT_API_KEY;
 
-// ===== STORE =====
-const ORDERS = new Map(); // orderId -> order
+// WhatsApp Cloud API (Meta)
+const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
+const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
+const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN;
 
+// Cardápio Web
+const CARDAPIOWEB_BASE_URL = process.env.CARDAPIOWEB_BASE_URL; // ex: https://api.cardapioweb.com
+const CARDAPIOWEB_TOKEN = process.env.CARDAPIOWEB_TOKEN;
+const CARDAPIOWEB_STORE_ID = process.env.CARDAPIOWEB_STORE_ID;
+
+// Caminho configurável (pra você ajustar sem mexer no código)
+const CARDAPIOWEB_CREATE_ORDER_PATH =
+  process.env.CARDAPIOWEB_CREATE_ORDER_PATH || "/stores/{storeId}/orders";
+
+// Sua loja
+const STORE_META = {
+  storeName: "Pappi Pizza",
+  menuUrl: "https://app.cardapioweb.com/pappi_pizza?s=dony",
+  whatsappNumbers: ["+55 19 98319-3999", "+55 19 98227-5105"],
+};
+
+/**
+ * =========================
+ * HELPERS
+ * =========================
+ */
 function nowIso() {
   return new Date().toISOString();
 }
@@ -34,160 +51,92 @@ function requireApiKey(req, res, next) {
   }
 
   if (!key || key !== ATTENDANT_API_KEY) {
-    return res.status(401).json({
-      error: "Unauthorized",
-      message: "API Key inválida ou ausente",
-    });
+    return res.status(401).json({ error: "Unauthorized", message: "API Key inválida ou ausente" });
   }
-
   next();
 }
 
-function validateOrderBody(body) {
-  const errors = [];
-
-  if (!body || typeof body !== "object") errors.push("Body inválido.");
-  if (!body.channel || !["site", "whatsapp"].includes(body.channel))
-    errors.push("channel deve ser 'site' ou 'whatsapp'.");
-
-  const c = body.customer;
-  if (!c || typeof c !== "object") errors.push("customer é obrigatório.");
-  else {
-    if (!c.name || typeof c.name !== "string") errors.push("customer.name é obrigatório.");
-    if (!c.phone || typeof c.phone !== "string") errors.push("customer.phone é obrigatório.");
+async function httpJson(url, opts = {}) {
+  const resp = await fetch(url, opts);
+  const text = await resp.text();
+  let data;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = { raw: text };
   }
-
-  if (!Array.isArray(body.items) || body.items.length < 1) errors.push("items deve ter pelo menos 1 item.");
-  else {
-    body.items.forEach((it, i) => {
-      if (!it.itemId) errors.push(`items[${i}].itemId é obrigatório.`);
-      if (!it.name) errors.push(`items[${i}].name é obrigatório.`);
-      if (!Number.isInteger(it.quantity) || it.quantity < 1) errors.push(`items[${i}].quantity deve ser inteiro >= 1.`);
-      if (typeof it.unitPrice !== "number" || Number.isNaN(it.unitPrice))
-        errors.push(`items[${i}].unitPrice deve ser número.`);
-    });
+  if (!resp.ok) {
+    const err = new Error(`HTTP ${resp.status}`);
+    err.status = resp.status;
+    err.data = data;
+    throw err;
   }
-
-  return errors;
+  return data;
 }
 
-// ===== PUBLIC =====
-app.get("/health", (req, res) => {
-  res.json({ ok: true, app: "Pappi Pizza API", time: nowIso() });
-});
+function normalizePhoneBR(phone) {
+  // recebe "5511999999999" ou "+55 11 99999-9999"
+  return (phone || "").replace(/\D/g, "");
+}
 
-app.get("/meta", (req, res) => {
-  res.json({
-    storeName: "Pappi Pizza",
-    menuUrl: "https://app.cardapioweb.com/pappi_pizza?s=dony",
-    whatsappNumbers: ["+55 19 98319-3999", "+55 19 98227-5105"],
-  });
-});
-
-// Mostra status das envs e se o header chegou (sem expor valores)
-app.get("/debug-auth", (req, res) => {
-  const headerKey = req.header("X-API-Key") || "";
-  res.json({
-    hasEnvAttendantKey: Boolean(ATTENDANT_API_KEY),
-    attendantKeyLength: (ATTENDANT_API_KEY || "").length,
-    hasHeaderKey: Boolean(headerKey),
-    headerKeyLength: headerKey.length,
-
-    hasWhatsappToken: Boolean(WHATSAPP_TOKEN),
-    hasWhatsappPhoneNumberId: Boolean(WHATSAPP_PHONE_NUMBER_ID),
-    hasWebhookVerifyToken: Boolean(WEBHOOK_VERIFY_TOKEN),
-  });
-});
-
-// ===== PROTECTED (ATENDENTES) =====
-
-// Criar pedido
-app.post("/orders", requireApiKey, (req, res) => {
-  const errors = validateOrderBody(req.body);
-  if (errors.length) return res.status(400).json({ error: "BadRequest", messages: errors });
-
-  const orderId = "ord_" + Math.random().toString(36).slice(2, 10);
-  const subtotal = req.body.items.reduce((acc, it) => acc + it.quantity * it.unitPrice, 0);
-  const deliveryFee = typeof req.body.deliveryFee === "number" ? req.body.deliveryFee : 0;
-  const discount = typeof req.body.discount === "number" ? req.body.discount : 0;
-  const total = Math.max(0, subtotal + deliveryFee - discount);
-
-  const order = {
-    id: orderId,
-    status: "received",
-    channel: req.body.channel,
-    customer: req.body.customer,
-    items: req.body.items,
-    totals: { subtotal, deliveryFee, discount, total },
-    createdAt: nowIso(),
-    updatedAt: nowIso(),
-  };
-
-  ORDERS.set(orderId, order);
-  return res.status(201).json(order);
-});
-
-// Listar últimos 30 pedidos
-app.get("/orders", requireApiKey, (req, res) => {
-  const arr = Array.from(ORDERS.values())
-    .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
-    .slice(0, 30);
-  res.json(arr);
-});
-
-// Buscar pedido por ID
-app.get("/orders/:orderId", requireApiKey, (req, res) => {
-  const order = ORDERS.get(req.params.orderId);
-  if (!order) return res.status(404).json({ error: "NotFound", message: "Pedido não encontrado." });
-  res.json(order);
-});
-
-// Gerar link de checkout WhatsApp (wa.me)
-app.post("/checkout/whatsapp", requireApiKey, (req, res) => {
-  const { orderId, preferredWhatsApp } = req.body || {};
-  if (!orderId || typeof orderId !== "string") {
-    return res.status(400).json({ error: "BadRequest", message: "orderId é obrigatório." });
+/**
+ * =========================
+ * CARDÁPIO WEB - CREATE ORDER (direto)
+ * =========================
+ * Atenção: o endpoint real pode variar.
+ * Por isso usamos CARDAPIOWEB_CREATE_ORDER_PATH com {storeId}.
+ */
+async function createOrderInCardapioWeb(orderPayload) {
+  if (!CARDAPIOWEB_BASE_URL || !CARDAPIOWEB_TOKEN) {
+    return {
+      ok: false,
+      reason: "CardapioWebNotConfigured",
+      message: "CARDAPIOWEB_BASE_URL / CARDAPIOWEB_TOKEN não configurados no Render.",
+    };
   }
 
-  const order = ORDERS.get(orderId);
-  if (!order) return res.status(404).json({ error: "NotFound", message: "Pedido não encontrado." });
+  const path = CARDAPIOWEB_CREATE_ORDER_PATH.replace("{storeId}", CARDAPIOWEB_STORE_ID || "");
+  const url = `${CARDAPIOWEB_BASE_URL}${path}`;
 
-  const number = (preferredWhatsApp || "+55 19 98227-5105").replace(/\D/g, "");
-  const messageText =
-    `Olá! Quero finalizar meu pedido na *Pappi Pizza* 🍕\n` +
-    `Pedido: ${orderId}\n\n` +
-    `Total: *R$ ${order.totals.total.toFixed(2)}*\n` +
-    `Cardápio: https://app.cardapioweb.com/pappi_pizza?s=dony`;
+  // ajuste headers conforme doc do Cardápio Web (alguns usam Bearer, outros X-API-Key)
+  const headers = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${CARDAPIOWEB_TOKEN}`,
+  };
 
-  const whatsappUrl = `https://wa.me/${number}?text=${encodeURIComponent(messageText)}`;
-
-  res.json({
-    channel: "whatsapp",
-    whatsappNumber: preferredWhatsApp || "+55 19 98227-5105",
-    whatsappUrl,
-    messageText,
+  const data = await httpJson(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(orderPayload),
   });
-});
 
-// ===== WHATSAPP CLOUD API =====
+  return { ok: true, data };
+}
 
-// Envia texto via WhatsApp Cloud API
+/**
+ * =========================
+ * WHATSAPP - SEND MESSAGE
+ * =========================
+ */
 async function sendWhatsAppText(to, text) {
   if (!WHATSAPP_TOKEN || !WHATSAPP_PHONE_NUMBER_ID) {
-    console.log("⚠️ WhatsApp envs faltando (WHATSAPP_TOKEN/WHATSAPP_PHONE_NUMBER_ID).");
-    return { ok: false, error: "WhatsAppEnvMissing" };
+    return {
+      ok: false,
+      reason: "WhatsAppNotConfigured",
+      message: "WHATSAPP_TOKEN / WHATSAPP_PHONE_NUMBER_ID não configurados no Render.",
+    };
   }
 
   const url = `https://graph.facebook.com/v24.0/${WHATSAPP_PHONE_NUMBER_ID}/messages`;
 
   const payload = {
     messaging_product: "whatsapp",
-    to,
+    to: normalizePhoneBR(to),
     type: "text",
     text: { body: text },
   };
 
-  const resp = await fetch(url, {
+  const data = await httpJson(url, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${WHATSAPP_TOKEN}`,
@@ -196,129 +145,250 @@ async function sendWhatsAppText(to, text) {
     body: JSON.stringify(payload),
   });
 
-  const data = await resp.json().catch(() => ({}));
-  if (!resp.ok) {
-    console.log("❌ Erro ao enviar WhatsApp:", resp.status, data);
-    return { ok: false, status: resp.status, data };
-  }
   return { ok: true, data };
 }
 
-// Verificação do webhook (Meta chama GET com challenge)
+/**
+ * =========================
+ * VERY SIMPLE ORDER PARSER (MVP)
+ * =========================
+ * Exemplo: "1 pizza calabresa grande + 1 coca 2l"
+ * Aqui é simples. Depois a gente liga com catálogo real do Cardápio Web.
+ */
+function parseOrderFromText(text) {
+  const t = (text || "").toLowerCase();
+
+  // gatilhos rápidos
+  if (t.includes("cardapio") || t.includes("cardápio")) {
+    return { intent: "MENU" };
+  }
+
+  // MVP: detecta 1 pizza calabresa + 1 coca
+  const items = [];
+  if (t.includes("calabresa")) {
+    items.push({ itemId: "pizza_calabresa", name: "Pizza Calabresa", quantity: 1, unitPrice: 59.9 });
+  }
+  if (t.includes("coca") && (t.includes("2l") || t.includes("2 l"))) {
+    items.push({ itemId: "coca_2l", name: "Coca-Cola 2L", quantity: 1, unitPrice: 12.0 });
+  }
+
+  if (!items.length) return { intent: "UNKNOWN" };
+
+  return {
+    intent: "CREATE_ORDER",
+    channel: "whatsapp",
+    customer: null, // a gente vai montar com o número
+    items,
+  };
+}
+
+/**
+ * =========================
+ * PUBLIC
+ * =========================
+ */
+app.get("/health", (req, res) => {
+  res.json({ ok: true, app: "Pappi Pizza API", time: nowIso() });
+});
+
+app.get("/meta", (req, res) => {
+  res.json(STORE_META);
+});
+
+app.get("/debug-auth", (req, res) => {
+  const key = req.header("X-API-Key") || "";
+  res.json({
+    hasEnvAttendantKey: Boolean(ATTENDANT_API_KEY),
+    attendantKeyLength: (ATTENDANT_API_KEY || "").length,
+    hasHeaderKey: Boolean(key),
+    headerKeyLength: key.length,
+    hasWhatsappToken: Boolean(WHATSAPP_TOKEN),
+    hasWhatsappPhoneNumberId: Boolean(WHATSAPP_PHONE_NUMBER_ID),
+    hasWebhookVerifyToken: Boolean(WEBHOOK_VERIFY_TOKEN),
+    cardapioweb: {
+      hasBaseUrl: Boolean(CARDAPIOWEB_BASE_URL),
+      hasToken: Boolean(CARDAPIOWEB_TOKEN),
+      hasStoreId: Boolean(CARDAPIOWEB_STORE_ID),
+      createOrderPath: CARDAPIOWEB_CREATE_ORDER_PATH,
+    },
+  });
+});
+
+/**
+ * =========================
+ * PROTECTED (atendentes)
+ * =========================
+ */
+const ORDERS = new Map();
+
+app.post("/orders", requireApiKey, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const orderId = "ord_" + Math.random().toString(36).slice(2, 10);
+
+    const items = Array.isArray(body.items) ? body.items : [];
+    const subtotal = items.reduce((acc, it) => acc + (it.quantity || 0) * (it.unitPrice || 0), 0);
+    const deliveryFee = typeof body.deliveryFee === "number" ? body.deliveryFee : 0;
+    const discount = typeof body.discount === "number" ? body.discount : 0;
+    const total = Math.max(0, subtotal + deliveryFee - discount);
+
+    const order = {
+      id: orderId,
+      status: "received",
+      channel: body.channel || "whatsapp",
+      customer: body.customer || {},
+      items,
+      totals: { subtotal, deliveryFee, discount, total },
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+
+    ORDERS.set(orderId, order);
+
+    // Se quiser “criar direto” também no Cardápio Web
+    let cardapioWebResult = null;
+    if (body.syncCardapioWeb !== false) {
+      // Você pode ajustar o payload aqui conforme o formato exigido pelo Cardápio Web
+      const payloadToCardapioWeb = {
+        // modelo genérico (ajuste depois de confirmar a doc)
+        externalId: orderId,
+        channel: order.channel,
+        customer: order.customer,
+        items: order.items,
+        totals: order.totals,
+        createdAt: order.createdAt,
+      };
+
+      try {
+        cardapioWebResult = await createOrderInCardapioWeb(payloadToCardapioWeb);
+      } catch (e) {
+        cardapioWebResult = {
+          ok: false,
+          error: "CardapioWebError",
+          status: e.status,
+          data: e.data,
+        };
+      }
+    }
+
+    return res.status(201).json({ ...order, cardapioWeb: cardapioWebResult });
+  } catch (e) {
+    return res.status(500).json({ error: "ServerError", message: e.message });
+  }
+});
+
+app.get("/orders", requireApiKey, (req, res) => {
+  const arr = Array.from(ORDERS.values())
+    .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+    .slice(0, 30);
+  res.json(arr);
+});
+
+app.get("/orders/:orderId", requireApiKey, (req, res) => {
+  const order = ORDERS.get(req.params.orderId);
+  if (!order) return res.status(404).json({ error: "NotFound", message: "Pedido não encontrado." });
+  res.json(order);
+});
+
+/**
+ * =========================
+ * WHATSAPP WEBHOOK
+ * =========================
+ * 1) Verificação (GET)
+ * 2) Recebimento de mensagens (POST)
+ */
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
 
-  if (mode === "subscribe" && token === WEBHOOK_VERIFY_TOKEN) {
-    console.log("✅ Webhook verificado!");
+  if (mode === "subscribe" && token && WEBHOOK_VERIFY_TOKEN && token === WEBHOOK_VERIFY_TOKEN) {
     return res.status(200).send(challenge);
   }
   return res.sendStatus(403);
 });
 
-// Recebe eventos (mensagens, status etc)
 app.post("/webhook", async (req, res) => {
-  // Responda 200 rápido (Meta exige)
-  res.sendStatus(200);
-
   try {
     const body = req.body;
 
-    if (!body || body.object !== "whatsapp_business_account") return;
+    // Responde 200 rápido pro Meta não re-tentar
+    res.sendStatus(200);
 
-    const entry = body.entry?.[0];
-    const change = entry?.changes?.[0];
-    const value = change?.value;
+    // Estrutura padrão do WhatsApp Cloud
+    const entry = body?.entry?.[0];
+    const changes = entry?.changes?.[0];
+    const value = changes?.value;
 
-    // Mensagens do cliente
-    const messages = value?.messages;
-    if (!messages || !messages.length) return;
+    // Mensagens recebidas
+    const messages = value?.messages || [];
+    if (!messages.length) return;
 
-    const msg = messages[0];
-    const from = msg.from; // número do cliente (somente dígitos)
-    const text = msg.text?.body || "";
-    const lower = text.toLowerCase().trim();
+    for (const msg of messages) {
+      const from = msg.from; // número do cliente
+      const text = msg?.text?.body || "";
 
-    console.log("📩 WhatsApp msg:", { from, text });
+      const parsed = parseOrderFromText(text);
 
-    // ===== RESPOSTAS AUTOMÁTICAS (base) =====
-    // 1) Saudação
-    if (["oi", "ola", "olá", "bom dia", "boa tarde", "boa noite"].includes(lower)) {
-      await sendWhatsAppText(
-        from,
-        "Olá! 👋 Sou o atendente automático da Pappi Pizza 🍕\n\n" +
-          "Me diga o que você quer:\n" +
-          "1) Cardápio\n" +
-          "2) Fazer pedido\n" +
-          "3) Falar com atendente"
-      );
-      return;
-    }
-
-    // 2) Cardápio
-    if (lower.includes("cardapio") || lower.includes("cardápio") || lower === "1") {
-      await sendWhatsAppText(
-        from,
-        "Aqui está nosso cardápio 👇\n" +
-          "https://app.cardapioweb.com/pappi_pizza?s=dony\n\n" +
-          "Se quiser pedir por aqui, me diga: sabor + tamanho (ex: Calabresa grande)."
-      );
-      return;
-    }
-
-    // 3) Falar com atendente (humano)
-    if (lower.includes("atendente") || lower.includes("humano") || lower === "3") {
-      await sendWhatsAppText(
-        from,
-        "Certo! ✅ Já vou te direcionar para uma atendente.\n" +
-          "Enquanto isso, pode me dizer seu bairro e o que deseja?"
-      );
-      return;
-    }
-
-    // 4) Tentativa simples de “capturar pedido”
-    // Ex: "calabresa grande", "frango catupiry media"
-    if (lower === "2" || lower.includes("pizza") || lower.includes("calabresa") || lower.includes("frango")) {
-      // Regra simples: se contiver "grande/média/broto"
-      let size = null;
-      if (lower.includes("grande")) size = "grande";
-      else if (lower.includes("media") || lower.includes("média")) size = "média";
-      else if (lower.includes("broto")) size = "broto";
-
-      if (!size) {
-        await sendWhatsAppText(
-          from,
-          "Perfeito 😄 Qual tamanho você quer?\n" +
-            "• Broto\n• Média\n• Grande\n\n" +
-            "Responda assim: *Calabresa grande*"
-        );
-        return;
+      if (parsed.intent === "MENU") {
+        await sendWhatsAppText(from, `🍕 Cardápio Pappi Pizza:\n${STORE_META.menuUrl}\n\nMe diga o que você quer pedir 😉`);
+        continue;
       }
 
-      await sendWhatsAppText(
-        from,
-        "Show! ✅ Anotei seu pedido.\n" +
-          `Você pediu: *${text}*\n\n` +
-          "Agora me diga:\n" +
-          "• Nome\n• Endereço (rua, número, bairro)\n• Forma de pagamento (pix/cartão/dinheiro)"
-      );
-      return;
-    }
+      if (parsed.intent === "UNKNOWN") {
+        await sendWhatsAppText(
+          from,
+          `Me fala assim: "1 pizza calabresa grande + 1 coca 2L"\nOu digite "cardápio" pra ver opções 😉`
+        );
+        continue;
+      }
 
-    // 5) Fallback
-    await sendWhatsAppText(
-      from,
-      "Entendi 😊\n" +
-        "Para agilizar, me diga:\n" +
-        "• Sabor + tamanho (ex: *Calabresa grande*)\n" +
-        "ou digite *cardápio* para ver as opções."
-    );
-  } catch (err) {
-    console.log("❌ Erro no webhook:", err?.message);
+      if (parsed.intent === "CREATE_ORDER") {
+        // Monta cliente
+        const customer = {
+          name: "Cliente WhatsApp",
+          phone: from,
+        };
+
+        // Cria pedido DIRETO no Cardápio Web (ajuste o payload final conforme doc)
+        const orderPayload = {
+          channel: "whatsapp",
+          customer,
+          items: parsed.items,
+          // opcional: endereço se o cliente mandar
+        };
+
+        let result;
+        try {
+          result = await createOrderInCardapioWeb(orderPayload);
+        } catch (e) {
+          result = { ok: false, status: e.status, data: e.data };
+        }
+
+        if (!result.ok) {
+          await sendWhatsAppText(
+            from,
+            `⚠️ Não consegui registrar no sistema agora.\nMe confirma o pedido aqui mesmo e já te atendemos:\n\n${text}`
+          );
+          continue;
+        }
+
+        await sendWhatsAppText(
+          from,
+          `✅ Pedido registrado!\n\nAgora me envie o ENDEREÇO (rua, nº, bairro) e a forma de pagamento.`
+        );
+      }
+    }
+  } catch (e) {
+    // Se der erro, não derruba webhook
+    console.error("Webhook error:", e);
   }
 });
 
-// ===== START =====
+/**
+ * =========================
+ * START
+ * =========================
+ */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("🔥 Pappi API rodando na porta", PORT));

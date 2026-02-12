@@ -1,203 +1,238 @@
 /**
- * Pappi API - WhatsApp Cloud + Cardápio Web + GPT Actions
- * Versão Atualizada: Pagamento, Atendente e Validação de Catálogo
+ * Pappi API - WhatsApp Cloud + Cardápio Web + Health/Debug
+ * Node 18+ (fetch nativo)
  */
 
 const express = require("express");
 const app = express();
+
+// Body parser
 app.use(express.json({ limit: "2mb" }));
 
 // ===== ENV =====
 const API_KEY = process.env.ATTENDANT_API_KEY || "";
+
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN || "";
 const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID || "";
 const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN || "";
-const CARDAPIOWEB_BASE_URL = process.env.CARDAPIOWEB_BASE_URL || "https://integracao.cardapioweb.com";
+
+const CARDAPIOWEB_BASE_URL =
+  process.env.CARDAPIOWEB_BASE_URL || "https://integracao.cardapioweb.com";
 const CARDAPIOWEB_TOKEN = process.env.CARDAPIOWEB_TOKEN || "";
-const CARDAPIOWEB_STORE_ID = process.env.CARDAPIOWEB_STORE_ID || "";
 
-// ===== In-memory store =====
-const ORDERS = new Map();
-const SESSIONS = new Map();
+// ===== HELPERS =====
+function nowIso() {
+  return new Date().toISOString();
+}
 
-function nowIso() { return new Date().toISOString(); }
-
-// ===== HELPERS DE SESSÃO =====
-function getSession(phone) {
-  if (!SESSIONS.has(phone)) {
-    SESSIONS.set(phone, {
-      step: "start",
-      mode: null,
-      address: { street: "", district: "", ref: "" },
-      cart: [],
-      payment: null
+function requireApiKey(req, res, next) {
+  const key = req.header("X-API-Key");
+  if (!API_KEY) {
+    return res.status(500).json({
+      error: "ServerMisconfigured",
+      message: "ATTENDANT_API_KEY não configurada no Render (Environment).",
     });
   }
-  return SESSIONS.get(phone);
+  if (!key || key !== API_KEY) {
+    return res.status(401).json({
+      error: "Unauthorized",
+      message: "API Key inválida ou ausente",
+    });
+  }
+  next();
 }
 
-function resetSession(phone) {
-  SESSIONS.set(phone, {
-    step: "start",
-    mode: null,
-    address: { street: "", district: "", ref: "" },
-    cart: [],
-    payment: null
-  });
-}
-
-// ===== CARDAPIO WEB API =====
+// ===== CARDÁPIO WEB FETCH =====
 async function cardapioWebFetch(path, { method = "GET", body } = {}) {
+  if (!CARDAPIOWEB_TOKEN) {
+    throw new Error("CARDAPIOWEB_TOKEN não configurado no Render (Environment).");
+  }
+
   const url = `${CARDAPIOWEB_BASE_URL}${path}`;
   const resp = await fetch(url, {
     method,
     headers: {
-      "X-API-KEY": CARDAPIOWEB_TOKEN,
+      "X-API-KEY": CARDAPIOWEB_TOKEN, // padrão Cardápio Web
+      Accept: "application/json",
       "Content-Type": "application/json",
     },
     body: body ? JSON.stringify(body) : undefined,
   });
-  return resp.json();
+
+  const text = await resp.text();
+  let data;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = { raw: text };
+  }
+
+  if (!resp.ok) {
+    const err = new Error(data?.message || data?.error || "Erro Cardápio Web");
+    err.status = resp.status;
+    err.payload = data;
+    throw err;
+  }
+
+  return data;
 }
 
-// ===== WHATSAPP HELPERS =====
-async function sendWhatsApp(toNumber, payload) {
-  const url = `https://graph.facebook.com/v24.0/${WHATSAPP_PHONE_NUMBER_ID}/messages`;
-  await fetch(url, {
+// Exemplo do endpoint que você mandou (produção/sandbox muda só o base_url)
+async function consultarCatalogo() {
+  // ✅ conforme seu print: /api/partner/v1/catalog
+  return cardapioWebFetch("/api/partner/v1/catalog");
+}
+
+// ===== WHATSAPP CLOUD =====
+async function sendWhatsAppText(toNumber, text) {
+  if (!WHATSAPP_TOKEN || !WHATSAPP_PHONE_NUMBER_ID) {
+    throw new Error("WHATSAPP_TOKEN ou WHATSAPP_PHONE_NUMBER_ID não configurados.");
+  }
+
+  const url = `https://graph.facebook.com/v20.0/${WHATSAPP_PHONE_NUMBER_ID}/messages`;
+
+  const payload = {
+    messaging_product: "whatsapp",
+    to: String(toNumber).replace(/\D/g, ""),
+    type: "text",
+    text: { body: text },
+  };
+
+  const resp = await fetch(url, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${WHATSAPP_TOKEN}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ messaging_product: "whatsapp", to: toNumber, ...payload }),
+    body: JSON.stringify(payload),
   });
+
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    const err = new Error(data?.error?.message || "Erro ao enviar WhatsApp");
+    err.status = resp.status;
+    err.payload = data;
+    throw err;
+  }
+  return data;
 }
 
-async function sendButtons(toNumber, text, buttons) {
-  const payload = {
-    type: "interactive",
-    interactive: {
-      type: "button",
-      body: { text },
-      action: {
-        buttons: buttons.map(b => ({ type: "reply", reply: { id: b.id, title: b.title } }))
+function extractIncomingMessages(body) {
+  const out = [];
+  const entry = body?.entry || [];
+  for (const e of entry) {
+    const changes = e?.changes || [];
+    for (const c of changes) {
+      const value = c?.value;
+      const messages = value?.messages || [];
+      for (const m of messages) {
+        out.push({
+          from: m.from,
+          id: m.id,
+          timestamp: m.timestamp,
+          type: m.type,
+          text: m.text?.body || "",
+          raw: m,
+        });
       }
     }
-  };
-  await sendWhatsApp(toNumber, payload);
+  }
+  return out;
 }
 
-// ===== WEBHOOK WHATSAPP =====
+// =====✅ ROTAS DE STATUS (COLEI AQUI DO JEITO CERTO) =====
+app.get("/", (req, res) => {
+  res.status(200).send("Pappi API online ✅");
+});
 
-app.get("/webhook", (req, res) => {
-  if (req.query["hub.mode"] === "subscribe" && req.query["hub.verify_token"] === WEBHOOK_VERIFY_TOKEN) {
-    return res.status(200).send(req.query["hub.challenge"]);
+app.get("/health", (req, res) => {
+  res
+    .status(200)
+    .json({ ok: true, app: "Pappi Pizza API", time: nowIso() });
+});
+
+app.get("/debug-auth", (req, res) => {
+  const headerKey = req.header("X-API-Key") || "";
+  res.status(200).json({
+    ok: true,
+    hasEnvAttendantKey: Boolean(process.env.ATTENDANT_API_KEY),
+    attendantKeyLength: (process.env.ATTENDANT_API_KEY || "").length,
+    hasHeaderKey: Boolean(headerKey),
+    headerKeyLength: headerKey.length,
+
+    hasWhatsappToken: Boolean(WHATSAPP_TOKEN),
+    hasWhatsappPhoneNumberId: Boolean(WHATSAPP_PHONE_NUMBER_ID),
+    hasWebhookVerifyToken: Boolean(WEBHOOK_VERIFY_TOKEN),
+
+    cardapioWebBaseUrl: CARDAPIOWEB_BASE_URL,
+    hasCardapioWebToken: Boolean(CARDAPIOWEB_TOKEN),
+  });
+});
+
+// ===== TESTE: puxar catálogo direto (pra você validar) =====
+app.get("/catalog", async (req, res) => {
+  try {
+    const catalog = await consultarCatalogo();
+    res.json(catalog);
+  } catch (err) {
+    res.status(err.status || 500).json({
+      error: "CatalogError",
+      message: err.message,
+      status: err.status || 500,
+      payload: err.payload || null,
+    });
   }
-  res.sendStatus(403);
+});
+
+// ===== WEBHOOK WHATSAPP =====
+app.get("/webhook", (req, res) => {
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+
+  if (mode === "subscribe" && token === WEBHOOK_VERIFY_TOKEN) {
+    return res.status(200).send(challenge);
+  }
+  return res.sendStatus(403);
 });
 
 app.post("/webhook", async (req, res) => {
+  // Responde rápido pra Meta
   res.sendStatus(200);
-  const entry = req.body.entry?.[0]?.changes?.[0]?.value;
-  const msg = entry?.messages?.[0];
-  if (!msg) return;
-
-  const phone = msg.from;
-  const session = getSession(phone);
-  const text = (msg.text?.body || msg.interactive?.button_reply?.title || "").trim();
-  const lower = text.toLowerCase();
 
   try {
-    // 1. Lógica de Atendente (Transbordo)
-    if (lower.includes("atendente") || lower.includes("humano") || msg.interactive?.button_reply?.id === "HUMAN") {
-      await sendWhatsApp(phone, { type: "text", text: { body: "🎧 Entendido! Estou transferindo você para um atendente humano. Por favor, aguarde um instante." } });
-      session.step = "waiting_human";
-      return;
-    }
+    const msgs = extractIncomingMessages(req.body);
 
-    // 2. Fluxo Principal
-    if (lower === "oi" || lower === "ola" || lower === "menu") {
-      resetSession(phone);
-      return await sendButtons(phone, "Bem-vindo à Pappi Pizza! 🍕\nComo deseja seu pedido hoje?", [
-        { id: "DELIVERY", title: "🛵 Entrega" },
-        { id: "TAKEOUT", title: "🏃 Retirada" },
-        { id: "OTHER", title: "📂 Outros" }
-      ]);
-    }
+    for (const msg of msgs) {
+      const text = (msg.text || "").trim();
+      if (!text) continue;
 
-    // Botão Outros
-    if (msg.interactive?.button_reply?.id === "OTHER") {
-      return await sendButtons(phone, "O que você precisa?\n📍 Endereço: Campinas, SP\n🕒 Horário: 18h às 23h", [
-        { id: "HUMAN", title: "🎧 Atendente" },
-        { id: "MENU_LINK", title: "📖 Ver Cardápio" }
-      ]);
-    }
+      const lower = text.toLowerCase();
 
-    // Link do Cardápio
-    if (msg.interactive?.button_reply?.id === "MENU_LINK") {
-        return await sendWhatsApp(phone, { type: "text", text: { body: "📖 Confira nosso cardápio online:\nhttps://app.cardapioweb.com/pappi_pizza?s=dony" } });
-    }
-
-    // Seleção de Canal
-    if (msg.interactive?.button_reply?.id === "DELIVERY") {
-      session.mode = "delivery";
-      session.step = "ask_address";
-      return await sendWhatsApp(phone, { type: "text", text: { body: "🛵 *Entrega*\nPor favor, digite seu endereço completo (Rua, nº e Bairro):" } });
-    }
-
-    if (msg.interactive?.button_reply?.id === "TAKEOUT") {
-      session.mode = "takeout";
-      session.step = "ask_item";
-      return await sendWhatsApp(phone, { type: "text", text: { body: "🏃 *Retirada*\nO que você deseja pedir? (Ex: 1 Pizza Calabresa)" } });
-    }
-
-    // Passo: Endereço
-    if (session.step === "ask_address") {
-      session.address.street = text;
-      session.step = "ask_item";
-      return await sendWhatsApp(phone, { type: "text", text: { body: "Endereço anotado! 📍\nAgora me diga o que deseja pedir:" } });
-    }
-
-    // Passo: Item do Pedido e Validação de Catálogo
-    if (session.step === "ask_item") {
-      session.cart.push(text);
-      session.step = "ask_payment";
-      return await sendButtons(phone, `Confirmado: ${text} ✅\nComo deseja realizar o pagamento?`, [
-        { id: "PAY_PIX", title: "💎 PIX" },
-        { id: "PAY_CARD", title: "💳 Cartão" },
-        { id: "PAY_CASH", title: "💵 Dinheiro" }
-      ]);
-    }
-
-    // Passo: Pagamento e Finalização
-    if (session.step === "ask_payment" && msg.type === "interactive") {
-      session.payment = text;
-      
-      // Enviar para API Cardápio Web
-      const orderBody = {
-        store_id: CARDAPIOWEB_STORE_ID,
-        customer: { phone: phone, name: "Cliente WhatsApp" },
-        items: [{ product_id: session.cart[0], quantity: 1 }],
-        delivery_type: session.mode,
-        payment_method: session.payment,
-        address: session.mode === "delivery" ? { street: session.address.street } : null
-      };
-
-      try {
-        const result = await cardapioWebFetch("/orders", { method: "POST", body: orderBody });
-        await sendWhatsApp(phone, { type: "text", text: { body: `✅ PEDIDO REALIZADO!\nObrigado por escolher a Pappi Pizza.\nSeu pedido em breve será processado.` } });
-      } catch (e) {
-        await sendWhatsApp(phone, { type: "text", text: { body: "❌ Erro ao enviar para o sistema. Um atendente entrará em contato." } });
+      if (lower === "menu" || lower === "cardapio" || lower === "cardápio") {
+        await sendWhatsAppText(
+          msg.from,
+          `🍕 *Pappi Pizza* — Cardápio:\nhttps://app.cardapioweb.com/pappi_pizza?s=dony\n\nQuer pedir? Me diga: *sabor + tamanho* (ex: Calabresa grande).`
+        );
+        continue;
       }
-      
-      resetSession(phone);
-      return;
-    }
 
+      // Exemplo simples: responde eco + instrução
+      await sendWhatsAppText(
+        msg.from,
+        `Recebi: "${text}" ✅\n\nDigite *menu* para ver o cardápio.`
+      );
+    }
   } catch (err) {
-    console.error("Erro no Webhook:", err);
+    console.error("Webhook error:", err?.message, err?.payload || "");
   }
 });
 
+// ===== ROTAS PROTEGIDAS (GPT Actions / atendentes) =====
+app.get("/orders", requireApiKey, (req, res) => {
+  res.json({ ok: true, message: "endpoint de pedidos interno (coloque sua lógica aqui)" });
+});
+
+// ===== RUN =====
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("🔥 Pappi API rodando na porta", PORT));

@@ -1,22 +1,194 @@
-// ===== BUSCAR PEDIDOS CARDAPIOWEB =====
-async function buscarPedidosCardapioWeb() {
-  try {
-
-    const url = `https://api.cardapioweb.com.br/merchants/${process.env.CARDAPIOWEB_STORE_ID}/orders`;
-
-    const resp = await fetch(url, {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${process.env.CARDAPIOWEB_TOKEN}`,
-        "Content-Type": "application/json"
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Pappi Pizza Actions API (PRO)",
+    "version": "1.0.0",
+    "description": "API interna da Pappi Pizza para atendentes via GPT Actions. Endpoints públicos: /health, /meta, /debug-auth. Endpoints protegidos: /orders, /orders/{orderId}, /checkout/whatsapp."
+  },
+  "servers": [
+    { "url": "https://pappi-api.onrender.com" }
+  ],
+  "components": {
+    "securitySchemes": {
+      "AttendantApiKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key"
       }
-    });
-
-    const data = await resp.json();
-
-    console.log("📦 Pedidos CardapioWeb:", data);
-
-  } catch (e) {
-    console.log("❌ erro pedidos cardapioweb:", e.message);
+    },
+    "schemas": {
+      "OrderCreate": {
+        "type": "object",
+        "required": ["channel", "customer", "items"],
+        "properties": {
+          "channel": { "type": "string", "enum": ["site", "whatsapp"] },
+          "customer": {
+            "type": "object",
+            "required": ["name", "phone"],
+            "properties": {
+              "name": { "type": "string" },
+              "phone": { "type": "string" },
+              "address": {
+                "type": "object",
+                "properties": {
+                  "street": { "type": "string" },
+                  "neighborhood": { "type": "string" },
+                  "city": { "type": "string" },
+                  "state": { "type": "string" },
+                  "zip": { "type": "string" },
+                  "reference": { "type": "string" }
+                }
+              }
+            }
+          },
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["itemId", "name", "quantity", "unitPrice"],
+              "properties": {
+                "itemId": { "type": "string" },
+                "name": { "type": "string" },
+                "quantity": { "type": "integer", "minimum": 1 },
+                "unitPrice": { "type": "number" },
+                "notes": { "type": "string" }
+              }
+            }
+          },
+          "deliveryFee": { "type": "number" },
+          "discount": { "type": "number" }
+        }
+      },
+      "Order": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "status": { "type": "string" },
+          "channel": { "type": "string" },
+          "customer": { "type": "object" },
+          "items": { "type": "array", "items": { "type": "object" } },
+          "totals": { "type": "object" },
+          "createdAt": { "type": "string" },
+          "updatedAt": { "type": "string" }
+        }
+      },
+      "CheckoutRequest": {
+        "type": "object",
+        "required": ["orderId"],
+        "properties": {
+          "orderId": { "type": "string" },
+          "preferredWhatsApp": { "type": "string" }
+        }
+      },
+      "CheckoutResponse": {
+        "type": "object",
+        "properties": {
+          "channel": { "type": "string" },
+          "whatsappNumber": { "type": "string" },
+          "whatsappUrl": { "type": "string" },
+          "messageText": { "type": "string" }
+        }
+      }
+    }
+  },
+  "security": [
+    { "AttendantApiKey": [] }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "health",
+        "security": [],
+        "responses": {
+          "200": { "description": "OK" }
+        }
+      }
+    },
+    "/meta": {
+      "get": {
+        "operationId": "getMeta",
+        "security": [],
+        "responses": {
+          "200": { "description": "OK" }
+        }
+      }
+    },
+    "/debug-auth": {
+      "get": {
+        "operationId": "debugAuth",
+        "security": [],
+        "responses": {
+          "200": { "description": "Debug de ambiente/headers (não expõe segredos)" }
+        }
+      }
+    },
+    "/orders": {
+      "post": {
+        "operationId": "createOrder",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/OrderCreate" } }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Order" } }
+            }
+          },
+          "400": { "description": "BadRequest" },
+          "401": { "description": "Unauthorized" },
+          "500": { "description": "ServerMisconfigured" }
+        }
+      },
+      "get": {
+        "operationId": "listOrders",
+        "responses": {
+          "200": { "description": "OK" },
+          "401": { "description": "Unauthorized" },
+          "500": { "description": "ServerMisconfigured" }
+        }
+      }
+    },
+    "/orders/{orderId}": {
+      "get": {
+        "operationId": "getOrderById",
+        "parameters": [
+          { "name": "orderId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "OK" },
+          "401": { "description": "Unauthorized" },
+          "404": { "description": "NotFound" },
+          "500": { "description": "ServerMisconfigured" }
+        }
+      }
+    },
+    "/checkout/whatsapp": {
+      "post": {
+        "operationId": "checkoutWhatsApp",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/CheckoutRequest" } }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/CheckoutResponse" } }
+            }
+          },
+          "400": { "description": "BadRequest" },
+          "401": { "description": "Unauthorized" },
+          "404": { "description": "NotFound" },
+          "500": { "description": "ServerMisconfigured" }
+        }
+      }
+    }
   }
 }

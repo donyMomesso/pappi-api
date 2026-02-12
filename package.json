@@ -1,13 +1,22 @@
-{
-  "name": "pappi-api",
-  "version": "1.0.0",
-  "main": "index.js",
-  "type": "commonjs",
-  "scripts": {
-    "start": "node index.js"
-  },
-  "dependencies": {
-    "express": "^4.19.2",
-    "swagger-ui-express": "^5.0.1"
+// ===== BUSCAR PEDIDOS CARDAPIOWEB =====
+async function buscarPedidosCardapioWeb() {
+  try {
+
+    const url = `https://api.cardapioweb.com.br/merchants/${process.env.CARDAPIOWEB_STORE_ID}/orders`;
+
+    const resp = await fetch(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${process.env.CARDAPIOWEB_TOKEN}`,
+        "Content-Type": "application/json"
+      }
+    });
+
+    const data = await resp.json();
+
+    console.log("📦 Pedidos CardapioWeb:", data);
+
+  } catch (e) {
+    console.log("❌ erro pedidos cardapioweb:", e.message);
   }
 }

@@ -298,6 +298,49 @@ app.post("/checkout/whatsapp", requireApiKey, (req, res) => {
     messageText,
   });
 });
+// ===== WHATSAPP WEBHOOK =====
+
+app.get("/webhook", (req, res) => {
+  const VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN;
+
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+
+  if (mode === "subscribe" && token === VERIFY_TOKEN) {
+    console.log("✅ Webhook verificado!");
+    return res.status(200).send(challenge);
+  }
+
+  return res.sendStatus(403);
+});
+
+app.post("/webhook", async (req, res) => {
+  try {
+    const body = req.body;
+
+    if (body.object) {
+      const entry = body.entry?.[0];
+      const change = entry?.changes?.[0];
+      const value = change?.value;
+      const messages = value?.messages;
+
+      if (messages) {
+        const from = messages[0].from;
+        const text = messages[0].text?.body;
+
+        console.log("📲 Mensagem recebida:", from, text);
+
+        // 👉 Aqui depois vamos ligar com sua API de pedidos
+      }
+    }
+
+    res.sendStatus(200);
+  } catch (err) {
+    console.error("Erro webhook:", err);
+    res.sendStatus(500);
+  }
+});
 
 // =========================
 // START (Render)

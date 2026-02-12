@@ -1,46 +1,63 @@
-const express = require("express");
-const swaggerUi = require("swagger-ui-express");
+/**
+ * Pappi Pizza API (PRO) - Render + WhatsApp Cloud API
+ * Endpoints públicos: /health, /meta
+ * Endpoints internos (atendentes): /orders, /orders/:orderId, /checkout/whatsapp, /debug-auth
+ * Webhook WhatsApp: GET/POST /webhook
+ */
 
+const express = require("express");
 const app = express();
+
 app.use(express.json({ limit: "1mb" }));
 
-// ===== CONFIG =====
-const API_KEY = process.env.ATTENDANT_API_KEY;
-const DEFAULT_WPP = "+55 19 98227-5105";
+// =========================
+// CONFIG (Render Environment)
+// =========================
+const ATTENDANT_API_KEY = process.env.ATTENDANT_API_KEY; // usado pelo GPT Actions (X-API-Key)
+
+const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN; // Bearer token (Meta Cloud API)
+const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID; // ex: 901776653029199
+const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN; // ex: PAPPI_VERIFY_2026
 
 // In-memory store (temporário)
-const ORDERS = new Map();
+const ORDERS = new Map(); // orderId -> order
 
+// =========================
+// HELPERS
+// =========================
 function nowIso() {
   return new Date().toISOString();
 }
 
-// ===== AUTH =====
+function onlyDigits(str) {
+  return String(str || "").replace(/\D/g, "");
+}
+
 function requireApiKey(req, res, next) {
   const key = req.header("X-API-Key");
 
-  if (!API_KEY) {
+  if (!ATTENDANT_API_KEY) {
     return res.status(500).json({
       error: "ServerMisconfigured",
-      message: "ATTENDANT_API_KEY não configurada no Render (Environment)."
+      message:
+        "ATTENDANT_API_KEY não está configurada no servidor (Render > Environment).",
     });
   }
 
-  if (!key || key !== API_KEY) {
+  if (!key || key !== ATTENDANT_API_KEY) {
     return res.status(401).json({
       error: "Unauthorized",
-      message: "API Key inválida ou ausente"
+      message: "API Key inválida ou ausente",
     });
   }
 
-  next();
+  return next();
 }
 
-// ===== VALIDAR PEDIDO =====
 function validateOrderBody(body) {
   const errors = [];
-
   if (!body || typeof body !== "object") errors.push("Body inválido.");
+
   if (!body.channel || !["site", "whatsapp"].includes(body.channel)) {
     errors.push("channel deve ser 'site' ou 'whatsapp'.");
   }
@@ -58,220 +75,21 @@ function validateOrderBody(body) {
     body.items.forEach((it, i) => {
       if (!it.itemId) errors.push(`items[${i}].itemId é obrigatório.`);
       if (!it.name) errors.push(`items[${i}].name é obrigatório.`);
-      if (!Number.isInteger(it.quantity) || it.quantity < 1) errors.push(`items[${i}].quantity deve ser inteiro >= 1.`);
-      if (typeof it.unitPrice !== "number" || Number.isNaN(it.unitPrice)) errors.push(`items[${i}].unitPrice deve ser número.`);
+      if (!Number.isInteger(it.quantity) || it.quantity < 1) {
+        errors.push(`items[${i}].quantity deve ser inteiro >= 1.`);
+      }
+      if (typeof it.unitPrice !== "number" || Number.isNaN(it.unitPrice)) {
+        errors.push(`items[${i}].unitPrice deve ser número.`);
+      }
     });
   }
 
   return errors;
 }
 
-// ===== OPENAPI (para Stoplight + Swagger) =====
-const OPENAPI = {
-  openapi: "3.1.0",
-  info: {
-    title: "Pappi Pizza Actions API (PRO)",
-    version: "1.0.0",
-    description:
-      "API interna da Pappi Pizza para atendentes via GPT Actions. Endpoints públicos: /health, /meta, /openapi.json, /docs. Protegidos: /orders, /checkout/whatsapp, /orders/:orderId."
-  },
-  servers: [{ url: "https://pappi-api.onrender.com" }],
-  components: {
-    securitySchemes: {
-      AttendantApiKey: {
-        type: "apiKey",
-        in: "header",
-        name: "X-API-Key"
-      }
-    },
-    schemas: {
-      OrderCreate: {
-        type: "object",
-        required: ["channel", "customer", "items"],
-        properties: {
-          channel: { type: "string", enum: ["site", "whatsapp"] },
-          customer: {
-            type: "object",
-            required: ["name", "phone"],
-            properties: {
-              name: { type: "string" },
-              phone: { type: "string" },
-              address: {
-                type: "object",
-                properties: {
-                  street: { type: "string" },
-                  neighborhood: { type: "string" },
-                  city: { type: "string" },
-                  state: { type: "string" },
-                  zip: { type: "string" },
-                  reference: { type: "string" }
-                }
-              }
-            }
-          },
-          items: {
-            type: "array",
-            minItems: 1,
-            items: {
-              type: "object",
-              required: ["itemId", "name", "quantity", "unitPrice"],
-              properties: {
-                itemId: { type: "string" },
-                name: { type: "string" },
-                quantity: { type: "integer", minimum: 1 },
-                unitPrice: { type: "number" },
-                notes: { type: "string" }
-              }
-            }
-          },
-          deliveryFee: { type: "number" },
-          discount: { type: "number" }
-        }
-      },
-      Order: {
-        type: "object",
-        properties: {
-          id: { type: "string" },
-          status: { type: "string" },
-          channel: { type: "string" },
-          customer: { type: "object" },
-          items: { type: "array", items: { type: "object" } },
-          totals: { type: "object" },
-          createdAt: { type: "string" },
-          updatedAt: { type: "string" }
-        }
-      },
-      CheckoutRequest: {
-        type: "object",
-        required: ["orderId"],
-        properties: {
-          orderId: { type: "string" },
-          preferredWhatsApp: { type: "string" }
-        }
-      },
-      CheckoutResponse: {
-        type: "object",
-        properties: {
-          channel: { type: "string" },
-          whatsappNumber: { type: "string" },
-          whatsappUrl: { type: "string" },
-          messageText: { type: "string" }
-        }
-      }
-    }
-  },
-  security: [{ AttendantApiKey: [] }],
-  paths: {
-    "/health": {
-      get: {
-        operationId: "health",
-        security: [],
-        responses: { "200": { description: "OK" } }
-      }
-    },
-    "/meta": {
-      get: {
-        operationId: "getMeta",
-        security: [],
-        responses: { "200": { description: "OK" } }
-      }
-    },
-    "/openapi.json": {
-      get: {
-        operationId: "getOpenApi",
-        security: [],
-        responses: { "200": { description: "OpenAPI JSON" } }
-      }
-    },
-    "/docs": {
-      get: {
-        operationId: "getDocs",
-        security: [],
-        responses: { "200": { description: "Swagger UI" } }
-      }
-    },
-    "/debug-auth": {
-      get: {
-        operationId: "debugAuth",
-        responses: {
-          "200": { description: "Mostra se a key do header chegou (não expõe a key)" }
-        }
-      }
-    },
-    "/orders": {
-      post: {
-        operationId: "createOrder",
-        requestBody: {
-          required: true,
-          content: {
-            "application/json": { schema: { $ref: "#/components/schemas/OrderCreate" } }
-          }
-        },
-        responses: {
-          "201": {
-            description: "Created",
-            content: { "application/json": { schema: { $ref: "#/components/schemas/Order" } } }
-          },
-          "400": { description: "BadRequest" },
-          "401": { description: "Unauthorized" }
-        }
-      },
-      get: {
-        operationId: "listOrders",
-        responses: {
-          "200": { description: "OK" },
-          "401": { description: "Unauthorized" }
-        }
-      }
-    },
-    "/orders/{orderId}": {
-      get: {
-        operationId: "getOrderById",
-        parameters: [
-          {
-            name: "orderId",
-            in: "path",
-            required: true,
-            schema: { type: "string" }
-          }
-        ],
-        responses: {
-          "200": { description: "OK" },
-          "404": { description: "NotFound" },
-          "401": { description: "Unauthorized" }
-        }
-      }
-    },
-    "/checkout/whatsapp": {
-      post: {
-        operationId: "checkoutWhatsApp",
-        requestBody: {
-          required: true,
-          content: {
-            "application/json": { schema: { $ref: "#/components/schemas/CheckoutRequest" } }
-          }
-        },
-        responses: {
-          "200": {
-            description: "OK",
-            content: {
-              "application/json": { schema: { $ref: "#/components/schemas/CheckoutResponse" } }
-            }
-          },
-          "400": { description: "BadRequest" },
-          "404": { description: "NotFound" },
-          "401": { description: "Unauthorized" }
-        }
-      }
-    }
-  }
-};
-
-// ===== OPENAPI ENDPOINTS =====
-app.get("/openapi.json", (req, res) => res.json(OPENAPI));
-app.use("/docs", swaggerUi.serve, swaggerUi.setup(OPENAPI));
-
-// ===== PUBLIC =====
+// =========================
+// PUBLIC
+// =========================
 app.get("/health", (req, res) => {
   res.json({ ok: true, app: "Pappi Pizza API", time: nowIso() });
 });
@@ -280,25 +98,138 @@ app.get("/meta", (req, res) => {
   res.json({
     storeName: "Pappi Pizza",
     menuUrl: "https://app.cardapioweb.com/pappi_pizza?s=dony",
-    whatsappNumbers: ["+55 19 98319-3999", "+55 19 98227-5105"]
+    whatsappNumbers: ["+55 19 98319-3999", "+55 19 98227-5105"],
   });
 });
 
-// ===== DEBUG (TEMPORÁRIO) =====
+// =========================
+// DEBUG
+// =========================
 app.get("/debug-auth", (req, res) => {
-  const key = req.header("X-API-Key") || "";
+  const headerKey = req.header("X-API-Key") || "";
   res.json({
-    hasEnvKey: Boolean(process.env.ATTENDANT_API_KEY),
-    envKeyLength: (process.env.ATTENDANT_API_KEY || "").length,
-    hasHeaderKey: Boolean(key),
-    headerKeyLength: key.length
+    hasEnvAttendantKey: Boolean(ATTENDANT_API_KEY),
+    attendantKeyLength: (ATTENDANT_API_KEY || "").length,
+    hasHeaderKey: Boolean(headerKey),
+    headerKeyLength: headerKey.length,
+
+    hasWhatsappToken: Boolean(WHATSAPP_TOKEN),
+    hasWhatsappPhoneNumberId: Boolean(WHATSAPP_PHONE_NUMBER_ID),
+    hasWebhookVerifyToken: Boolean(WEBHOOK_VERIFY_TOKEN),
   });
 });
 
-// ===== PROTECTED (atendentes) =====
+// =========================
+// WHATSAPP WEBHOOK (META)
+// =========================
+
+// 1) Verificação (Meta chama GET /webhook?hub.*)
+app.get("/webhook", (req, res) => {
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+
+  if (!WEBHOOK_VERIFY_TOKEN) {
+    return res.status(500).send("WEBHOOK_VERIFY_TOKEN não configurado no servidor.");
+  }
+
+  if (mode === "subscribe" && token === WEBHOOK_VERIFY_TOKEN) {
+    console.log("✅ Webhook verificado com sucesso!");
+    return res.status(200).send(challenge);
+  }
+
+  return res.sendStatus(403);
+});
+
+// 2) Recebe mensagens
+app.post("/webhook", async (req, res) => {
+  // Meta exige resposta rápida 200
+  res.sendStatus(200);
+
+  try {
+    const body = req.body;
+
+    const entry = body?.entry?.[0];
+    const change = entry?.changes?.[0];
+    const value = change?.value;
+
+    const message = value?.messages?.[0];
+    if (!message) return;
+
+    const from = message.from; // ex: "5511999999999"
+    const text = message.text?.body?.trim() || "";
+
+    // Evitar responder status/eco
+    // (se vierem outros tipos, ignore)
+    if (!from) return;
+
+    // ===== LÓGICA DE ATENDIMENTO (MVP) =====
+    let reply =
+      "Olá! 👋 Eu sou a atendente automática da *Pappi Pizza* 🍕\n\n" +
+      "Me diga o que você quer pedir e se é *retirada* ou *entrega*.\n\n" +
+      "📖 Cardápio: https://app.cardapioweb.com/pappi_pizza?s=dony";
+
+    if (/card[aá]pio|menu/i.test(text)) {
+      reply = "🍕 Cardápio Pappi Pizza:\nhttps://app.cardapioweb.com/pappi_pizza?s=dony";
+    } else if (/oi|ol[aá]|bom dia|boa tarde|boa noite/i.test(text)) {
+      reply =
+        "Olá! 👋 Bem-vindo(a) à *Pappi Pizza* 🍕\n\n" +
+        "Quer pedir *pizza* ou *bebida*?\n" +
+        "E é *retirada* ou *entrega*?\n\n" +
+        "📖 Cardápio: https://app.cardapioweb.com/pappi_pizza?s=dony";
+    } else if (/endere[cç]o|entrega|taxa/i.test(text)) {
+      reply =
+        "Para entrega, me diga:\n" +
+        "1) Rua e nº\n2) Bairro\n3) Referência\n\n" +
+        "Aí eu confirmo a taxa e finalizamos ✅";
+    }
+
+    await sendWhatsAppText(from, reply);
+  } catch (err) {
+    console.error("Webhook error:", err);
+  }
+});
+
+// Envia mensagem de texto via Cloud API
+async function sendWhatsAppText(to, text) {
+  if (!WHATSAPP_TOKEN || !WHATSAPP_PHONE_NUMBER_ID) {
+    console.error("WHATSAPP_TOKEN ou WHATSAPP_PHONE_NUMBER_ID ausentes no Render.");
+    return;
+  }
+
+  const url = `https://graph.facebook.com/v19.0/${WHATSAPP_PHONE_NUMBER_ID}/messages`;
+
+  const payload = {
+    messaging_product: "whatsapp",
+    to,
+    type: "text",
+    text: { body: text },
+  };
+
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const data = await resp.json();
+  if (!resp.ok) console.error("WhatsApp send failed:", data);
+  return data;
+}
+
+// =========================
+// PROTECTED (ATENDENTES / GPT ACTIONS)
+// =========================
+
+// Criar pedido
 app.post("/orders", requireApiKey, (req, res) => {
   const errors = validateOrderBody(req.body);
-  if (errors.length) return res.status(400).json({ error: "BadRequest", messages: errors });
+  if (errors.length) {
+    return res.status(400).json({ error: "BadRequest", messages: errors });
+  }
 
   const orderId = "ord_" + Math.random().toString(36).slice(2, 10);
 
@@ -315,23 +246,30 @@ app.post("/orders", requireApiKey, (req, res) => {
     items: req.body.items,
     totals: { subtotal, deliveryFee, discount, total },
     createdAt: nowIso(),
-    updatedAt: nowIso()
+    updatedAt: nowIso(),
   };
 
   ORDERS.set(orderId, order);
   return res.status(201).json(order);
 });
 
+// Listar últimos pedidos (até 30)
 app.get("/orders", requireApiKey, (req, res) => {
-  res.json(Array.from(ORDERS.values()));
+  const arr = Array.from(ORDERS.values())
+    .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+    .slice(0, 30);
+
+  res.json(arr);
 });
 
+// Buscar pedido por ID
 app.get("/orders/:orderId", requireApiKey, (req, res) => {
   const order = ORDERS.get(req.params.orderId);
   if (!order) return res.status(404).json({ error: "NotFound", message: "Pedido não encontrado." });
   res.json(order);
 });
 
+// Gerar checkout WhatsApp (link wa.me)
 app.post("/checkout/whatsapp", requireApiKey, (req, res) => {
   const { orderId, preferredWhatsApp } = req.body || {};
   if (!orderId || typeof orderId !== "string") {
@@ -339,18 +277,15 @@ app.post("/checkout/whatsapp", requireApiKey, (req, res) => {
   }
 
   const order = ORDERS.get(orderId);
-  if (!order) return res.status(404).json({ error: "NotFound", message: "Pedido não encontrado." });
+  if (!order) {
+    return res.status(404).json({ error: "NotFound", message: "Pedido não encontrado." });
+  }
 
-  const number = (preferredWhatsApp || DEFAULT_WPP).replace(/\D/g, "");
-
-  const itemsText = order.items
-    .map(it => `• ${it.quantity}x ${it.name} (R$ ${Number(it.unitPrice).toFixed(2)})`)
-    .join("\n");
+  const number = onlyDigits(preferredWhatsApp || "+55 19 98227-5105");
 
   const messageText =
     `Olá! Quero finalizar meu pedido na *Pappi Pizza* 🍕\n` +
     `Pedido: ${orderId}\n\n` +
-    `Itens:\n${itemsText}\n\n` +
     `Total: *R$ ${order.totals.total.toFixed(2)}*\n` +
     `Cardápio: https://app.cardapioweb.com/pappi_pizza?s=dony`;
 
@@ -358,13 +293,14 @@ app.post("/checkout/whatsapp", requireApiKey, (req, res) => {
 
   res.json({
     channel: "whatsapp",
-    whatsappNumber: preferredWhatsApp || DEFAULT_WPP,
+    whatsappNumber: preferredWhatsApp || "+55 19 98227-5105",
     whatsappUrl,
-    messageText
+    messageText,
   });
 });
 
-// ===== START =====
+// =========================
+// START (Render)
+// =========================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("🔥 Pappi API rodando na porta", PORT));
-

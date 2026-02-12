@@ -1,7 +1,17 @@
 /**
- * Pappi Pizza API PRO
- * WhatsApp Cloud API (Interactive Buttons) + Cardápio Web Catalog + State machine
+ * Pappi API - WhatsApp Cloud + Cardápio Web (catálogo) + Botões
  * Node 18+ (fetch nativo)
+ *
+ * ✅ O que este index já faz:
+ * - /health e /debug-auth
+ * - Webhook GET/POST da Meta
+ * - Botões (reply buttons) e lista (list message)
+ * - Fluxo básico: Menu -> Cardápio / Fazer pedido / Atendente
+ * - Fazer pedido -> Entrega/Retirada -> Endereço -> Tamanho -> Sabores (puxa do Catálogo Cardápio Web)
+ *
+ * ⚠️ Observação:
+ * - Botões aceitam até 3 por mensagem (limite do WhatsApp).
+ * - Lista é melhor para muitos sabores/categorias.
  */
 
 const express = require("express");
@@ -19,57 +29,25 @@ const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN || "";
 const CARDAPIOWEB_BASE_URL =
   process.env.CARDAPIOWEB_BASE_URL || "https://integracao.cardapioweb.com";
 const CARDAPIOWEB_TOKEN = process.env.CARDAPIOWEB_TOKEN || "";
-
-// ===== STATE (memória por telefone) =====
-/**
- * USER_STATE.get(phone) => {
- *   step: "menu" | "awaiting_delivery_address" | "awaiting_order_text" | "browsing_categories" | "browsing_items",
- *   orderType: "delivery" | "takeout" | null,
- *   addressText: string | null,
- *   selectedCategoryId: number | null
- * }
- */
-const USER_STATE = new Map();
-
-// Cache simples do catálogo (evita chamar a API toda hora)
-let CATALOG_CACHE = null;
-let CATALOG_CACHE_AT = 0;
-const CATALOG_TTL_MS = 60 * 1000; // 60s
+const CARDAPIOWEB_STORE_ID = process.env.CARDAPIOWEB_STORE_ID || ""; // opcional (se a API exigir)
 
 function nowIso() {
   return new Date().toISOString();
 }
 
-function ensureState(phone) {
-  if (!USER_STATE.has(phone)) {
-    USER_STATE.set(phone, {
-      step: "menu",
-      orderType: null,
-      addressText: null,
-      selectedCategoryId: null,
-    });
-  }
-  return USER_STATE.get(phone);
+function normalizeText(s) {
+  return (s || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .trim();
 }
 
-function requireApiKey(req, res, next) {
-  const key = req.header("X-API-Key");
-  if (!API_KEY) {
-    return res.status(500).json({
-      error: "ServerMisconfigured",
-      message:
-        "ATTENDANT_API_KEY não configurada (Render > Environment Variables).",
-    });
-  }
-  if (!key || key !== API_KEY) {
-    return res
-      .status(401)
-      .json({ error: "Unauthorized", message: "API Key inválida ou ausente" });
-  }
-  next();
+function digitsOnly(s) {
+  return String(s || "").replace(/\D/g, "");
 }
 
-// ===== BASIC ROUTES =====
+// ===== HEALTH / DEBUG =====
 app.get("/", (req, res) => res.status(200).send("Pappi API online ✅"));
 
 app.get("/health", (req, res) => {
@@ -89,21 +67,52 @@ app.get("/debug-auth", (req, res) => {
     hasWebhookVerifyToken: Boolean(WEBHOOK_VERIFY_TOKEN),
     cardapioWebBaseUrl: CARDAPIOWEB_BASE_URL,
     hasCardapioWebToken: Boolean(CARDAPIOWEB_TOKEN),
+    hasCardapioWebStoreId: Boolean(CARDAPIOWEB_STORE_ID),
   });
 });
 
-// ===== CARDAPIO WEB =====
+// ===== In-memory session (simples) =====
+/**
+ * sessions.get(phone) = {
+ *   step: "MENU" | "ASK_ORDER_TYPE" | "ASK_ADDRESS" | "ASK_SIZE" | "ASK_FLAVOR" | "CONFIRM",
+ *   orderType: "delivery" | "takeout",
+ *   addressText: string,
+ *   size: "BROTINHO_4" | "GRANDE_8" | "GIGANTE_16",
+ *   flavorItemId: number | null,
+ *   flavorName: string | null,
+ * }
+ */
+const sessions = new Map();
+
+function getSession(from) {
+  if (!sessions.has(from)) sessions.set(from, { step: "MENU" });
+  return sessions.get(from);
+}
+
+function resetSession(from) {
+  sessions.set(from, { step: "MENU" });
+  return sessions.get(from);
+}
+
+// ===== Cardápio Web (helper) =====
 async function cardapioWebFetch(path, { method = "GET", body } = {}) {
-  if (!CARDAPIOWEB_TOKEN) throw new Error("CARDAPIOWEB_TOKEN não configurado.");
+  if (!CARDAPIOWEB_TOKEN) {
+    throw new Error("CARDAPIOWEB_TOKEN não configurado no Render (Environment).");
+  }
 
   const url = `${CARDAPIOWEB_BASE_URL}${path}`;
+  const headers = {
+    "X-API-KEY": CARDAPIOWEB_TOKEN,
+    "Content-Type": "application/json",
+    Accept: "application/json",
+  };
+
+  // algumas integrações exigem store_id em header (depende da sua conta/doc)
+  if (CARDAPIOWEB_STORE_ID) headers["X-STORE-ID"] = String(CARDAPIOWEB_STORE_ID);
+
   const resp = await fetch(url, {
     method,
-    headers: {
-      Accept: "application/json",
-      "X-API-KEY": CARDAPIOWEB_TOKEN, // padrão Cardápio Web
-      "Content-Type": "application/json",
-    },
+    headers,
     body: body ? JSON.stringify(body) : undefined,
   });
 
@@ -116,39 +125,42 @@ async function cardapioWebFetch(path, { method = "GET", body } = {}) {
   }
 
   if (!resp.ok) {
-    const msg = data?.message || data?.error || text || `Erro ${resp.status}`;
+    const msg = data?.message || data?.error || text || "Erro Cardápio Web";
     const err = new Error(msg);
     err.status = resp.status;
     err.payload = data;
     throw err;
   }
-
   return data;
 }
 
-async function getCatalogCached() {
-  const now = Date.now();
-  if (CATALOG_CACHE && now - CATALOG_CACHE_AT < CATALOG_TTL_MS) return CATALOG_CACHE;
-
-  // Endpoint que você mostrou:
-  // GET /api/partner/v1/catalog
-  const catalog = await cardapioWebFetch("/api/partner/v1/catalog");
-  CATALOG_CACHE = catalog;
-  CATALOG_CACHE_AT = now;
-  return catalog;
+// ✅ endpoint que você mostrou (produção):
+// GET /api/partner/v1/catalog
+async function getCatalog() {
+  // se sua rota for outra, ajuste aqui:
+  return cardapioWebFetch(`/api/partner/v1/catalog`);
 }
 
-function findCategory(catalog, categoryId) {
-  return (catalog?.categories || []).find((c) => String(c.id) === String(categoryId));
+// Monta lista de pizzas por categoria (primeira categoria com "pizza")
+async function getPizzaCategoryFromCatalog() {
+  const catalog = await getCatalog();
+  const categories = catalog?.categories || [];
+  const pizzaCat =
+    categories.find((c) => normalizeText(c?.name).includes("pizza")) ||
+    categories[0];
+
+  const items = (pizzaCat?.items || []).filter((it) => it?.status === "ACTIVE");
+  return { pizzaCategory: pizzaCat, items };
 }
 
-// ===== WHATSAPP SENDERS =====
+// ===== WhatsApp Cloud (helpers) =====
 async function waSend(payload) {
   if (!WHATSAPP_TOKEN || !WHATSAPP_PHONE_NUMBER_ID) {
     throw new Error("WHATSAPP_TOKEN ou WHATSAPP_PHONE_NUMBER_ID não configurados.");
   }
 
   const url = `https://graph.facebook.com/v24.0/${WHATSAPP_PHONE_NUMBER_ID}/messages`;
+
   const resp = await fetch(url, {
     method: "POST",
     headers: {
@@ -160,7 +172,8 @@ async function waSend(payload) {
 
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) {
-    const msg = data?.error?.message || `Erro WhatsApp (${resp.status})`;
+    const msg =
+      data?.error?.message || data?.message || `Erro WhatsApp (${resp.status})`;
     const err = new Error(msg);
     err.status = resp.status;
     err.payload = data;
@@ -172,34 +185,156 @@ async function waSend(payload) {
 async function sendText(to, text) {
   return waSend({
     messaging_product: "whatsapp",
-    to: String(to).replace(/\D/g, ""),
+    to: digitsOnly(to),
     type: "text",
     text: { body: text },
   });
 }
 
-async function sendButtons(to, bodyText, buttons) {
-  // WhatsApp permite até 3 botões
-  const safeButtons = buttons.slice(0, 3).map((b, idx) => ({
-    type: "reply",
-    reply: { id: b.id || `btn_${idx}`, title: b.title.slice(0, 20) },
-  }));
-
+// ✅ Reply Buttons (máx 3)
+async function sendButtons(to, bodyText, buttons /* [{id,title}] */) {
   return waSend({
     messaging_product: "whatsapp",
-    to: String(to).replace(/\D/g, ""),
+    to: digitsOnly(to),
     type: "interactive",
     interactive: {
       type: "button",
       body: { text: bodyText },
-      action: { buttons: safeButtons },
+      action: {
+        buttons: buttons.slice(0, 3).map((b) => ({
+          type: "reply",
+          reply: { id: b.id, title: b.title.slice(0, 20) },
+        })),
+      },
     },
   });
 }
 
-// ===== WEBHOOK (Meta) =====
+// ✅ Lista (bom pra muitos sabores)
+async function sendList(to, bodyText, buttonText, sections /* [{title, rows}] */) {
+  return waSend({
+    messaging_product: "whatsapp",
+    to: digitsOnly(to),
+    type: "interactive",
+    interactive: {
+      type: "list",
+      body: { text: bodyText },
+      action: {
+        button: buttonText.slice(0, 20),
+        sections: sections.slice(0, 10).map((s) => ({
+          title: (s.title || "Opções").slice(0, 24),
+          rows: (s.rows || []).slice(0, 10).map((r) => ({
+            id: String(r.id).slice(0, 200),
+            title: String(r.title || "").slice(0, 24),
+            description: r.description ? String(r.description).slice(0, 72) : undefined,
+          })),
+        })),
+      },
+    },
+  });
+}
 
-// 1) Verificação (GET)
+// Extrai mensagens do webhook
+function extractIncomingMessages(body) {
+  const out = [];
+  const entry = body?.entry || [];
+  for (const e of entry) {
+    const changes = e?.changes || [];
+    for (const c of changes) {
+      const value = c?.value;
+      const messages = value?.messages || [];
+      for (const m of messages) {
+        out.push({
+          from: m.from,
+          id: m.id,
+          type: m.type,
+          text: m.text?.body || "",
+          interactive:
+            m.interactive?.button_reply ||
+            m.interactive?.list_reply ||
+            null,
+          raw: m,
+        });
+      }
+    }
+  }
+  return out;
+}
+
+// ===== MENUS =====
+async function showMainMenu(to) {
+  await sendButtons(to, "🍕 Pappi Pizza\nComo posso te ajudar?", [
+    { id: "MENU_CARDAPIO", title: "📖 Cardápio" },
+    { id: "MENU_PEDIDO", title: "🛒 Fazer pedido" },
+    { id: "MENU_ATENDENTE", title: "👨‍🍳 Atendente" },
+  ]);
+}
+
+async function askOrderType(to) {
+  await sendButtons(to, "Perfeito! É entrega ou retirada?", [
+    { id: "TYPE_DELIVERY", title: "🛵 Entrega" },
+    { id: "TYPE_TAKEOUT", title: "🏃 Retirada" },
+    { id: "BACK_MENU", title: "⬅️ Menu" },
+  ]);
+}
+
+async function askAddress(to) {
+  await sendText(
+    to,
+    "🛵 *Entrega*\nMe mande:\n1) Rua e nº\n2) Bairro\n3) Referência (opcional)\n\nEx: Rua X, 123 - Jardim Bandeira II"
+  );
+}
+
+async function askSize(to) {
+  await sendButtons(to, "Show! Agora escolha o tamanho:", [
+    { id: "SIZE_BROTINHO_4", title: "🍕 Brotinho (4)" },
+    { id: "SIZE_GRANDE_8", title: "🍕 Grande (8)" },
+    { id: "SIZE_GIGANTE_16", title: "🍕 Gigante (16)" },
+  ]);
+}
+
+async function showFlavorsList(to) {
+  const { pizzaCategory, items } = await getPizzaCategoryFromCatalog();
+
+  // 10 por seção (limite). Se tiver mais, corta (depois a gente pagina).
+  const rows = items.slice(0, 10).map((it) => ({
+    id: `FLAVOR_${it.id}`,
+    title: it.name,
+    description: it.description ? it.description.slice(0, 60) : " ",
+  }));
+
+  await sendList(
+    to,
+    `🍕 Escolha o sabor (${pizzaCategory?.name || "Pizzas"})`,
+    "Ver sabores",
+    [{ title: "Sabores", rows }]
+  );
+}
+
+async function showOrderSummary(to, session) {
+  const tipo = session.orderType === "delivery" ? "Entrega" : "Retirada";
+  const tamanho =
+    session.size === "BROTINHO_4"
+      ? "Brotinho (4)"
+      : session.size === "GRANDE_8"
+      ? "Grande (8)"
+      : "Gigante (16)";
+
+  const resumo =
+    `🧾 *Resumo do pedido*\n` +
+    `Tipo: *${tipo}*\n` +
+    (session.orderType === "delivery"
+      ? `Endereço: *${session.addressText || "—"}*\n`
+      : "") +
+    `Tamanho: *${tamanho}*\n` +
+    `Sabor: *${session.flavorName || "—"}*\n\n` +
+    `✅ Se estiver certo, responda: *CONFIRMAR*\n` +
+    `❌ Para corrigir, responda: *ALTERAR*`;
+
+  await sendText(to, resumo);
+}
+
+// ===== WEBHOOK META =====
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -211,263 +346,174 @@ app.get("/webhook", (req, res) => {
   return res.sendStatus(403);
 });
 
-// Util: extrair texto e botões
-function extractIncoming(body) {
-  const entry = body?.entry || [];
-  const out = [];
-
-  for (const e of entry) {
-    for (const ch of e?.changes || []) {
-      const value = ch?.value;
-      const messages = value?.messages || [];
-
-      for (const m of messages) {
-        const from = m.from;
-        const type = m.type;
-
-        // Texto normal
-        if (type === "text") {
-          out.push({ from, kind: "text", text: m.text?.body || "" });
-        }
-
-        // Botão clicado
-        if (type === "interactive") {
-          const btnId = m.interactive?.button_reply?.id || "";
-          const btnTitle = m.interactive?.button_reply?.title || "";
-          out.push({ from, kind: "button", id: btnId, title: btnTitle });
-        }
-      }
-    }
-  }
-  return out;
-}
-
-// Menu principal
-async function showMainMenu(to) {
-  await sendButtons(to, "Olá! 👋 Sou a atendente automática da *Pappi Pizza* 🍕\nO que você quer fazer?", [
-    { id: "menu_catalogo", title: "📖 Cardápio" },
-    { id: "menu_pedido", title: "🛒 Fazer pedido" },
-    { id: "menu_atendente", title: "👨‍🍳 Atendente" },
-  ]);
-}
-
-// Fluxo: Cardápio -> categorias
-async function showCategories(to) {
-  const catalog = await getCatalogCached();
-  const categories = (catalog?.categories || [])
-    .filter((c) => c.status === "ACTIVE");
-
-  // mostra 3 categorias por vez (limite de botões)
-  const top = categories.slice(0, 3);
-  if (top.length === 0) {
-    await sendText(to, "Não encontrei categorias ativas no catálogo agora.");
-    return;
-  }
-
-  await sendButtons(to, "Escolha uma categoria 👇", top.map((c) => ({
-    id: `cat_${c.id}`,
-    title: c.name,
-  })));
-
-  // dica de mais categorias
-  if (categories.length > 3) {
-    await sendText(to, "Se quiser outra categoria, me diga o nome dela (ex: *Bebidas*, *Pizzas*).");
-  }
-}
-
-// Fluxo: categoria -> itens
-async function showItemsFromCategory(to, categoryId) {
-  const catalog = await getCatalogCached();
-  const cat = findCategory(catalog, categoryId);
-
-  if (!cat) {
-    await sendText(to, "Não achei essa categoria. Mande *cardápio* pra ver novamente.");
-    return;
-  }
-
-  const items = (cat.items || []).filter((i) => i.status === "ACTIVE");
-  if (items.length === 0) {
-    await sendText(to, `A categoria *${cat.name}* está sem itens ativos.`);
-    return;
-  }
-
-  const topItems = items.slice(0, 3);
-  const textList = topItems
-    .map((it, idx) => {
-      const base = `(${idx + 1}) ${it.name}`;
-      const price = it.price != null ? ` — R$ ${Number(it.price).toFixed(2)}` : "";
-      return base + price;
-    })
-    .join("\n");
-
-  // Botões: escolher 1, 2, 3
-  await sendButtons(
-    to,
-    `*${cat.name}*\nEscolha um item:\n${textList}`,
-    topItems.map((it) => ({
-      id: `item_${it.id}`,
-      title: it.name,
-    }))
-  );
-
-  if (items.length > 3) {
-    await sendText(to, "Se não aparecer, me diga o nome do item que você quer.");
-  }
-}
-
-// ===== WEBHOOK RECEIVER (POST) =====
 app.post("/webhook", async (req, res) => {
-  // responde rápido para a Meta
+  // WhatsApp quer 200 rápido
   res.sendStatus(200);
 
   try {
-    const incoming = extractIncoming(req.body);
+    const msgs = extractIncomingMessages(req.body);
 
-    for (const ev of incoming) {
-      const phone = ev.from;
-      const state = ensureState(phone);
+    for (const msg of msgs) {
+      const from = msg.from;
 
-      // Normaliza entrada para texto
-      const rawText =
-        ev.kind === "text"
-          ? (ev.text || "").trim()
-          : (ev.title || "").trim();
+      // texto ou clique em botão/lista
+      const text = (msg.text || "").trim();
+      const interactiveId =
+        msg.interactive?.id || msg.interactive?.payload || null; // payload no list_reply pode variar
+      const interactiveTitle = msg.interactive?.title || null;
 
-      const lower = rawText.toLowerCase();
+      const session = getSession(from);
 
-      // ===== COMMANDS GLOBAIS =====
-      if (!rawText || lower === "oi" || lower === "olá" || lower === "ola" || lower === "menu") {
-        state.step = "menu";
-        state.orderType = null;
-        state.addressText = null;
-        state.selectedCategoryId = null;
-        await showMainMenu(phone);
+      // ====== comandos universais ======
+      const normalized = normalizeText(text);
+
+      // reset
+      if (normalized === "menu" || normalized === "inicio" || interactiveId === "BACK_MENU") {
+        resetSession(from);
+        await showMainMenu(from);
         continue;
       }
 
-      if (lower === "cardapio" || lower === "cardápio") {
-        state.step = "browsing_categories";
-        await showCategories(phone);
-        continue;
-      }
-
-      // ===== CLIQUE NO MENU PRINCIPAL =====
-      if (ev.kind === "button" && ev.id === "menu_catalogo") {
-        state.step = "browsing_categories";
-        await showCategories(phone);
-        continue;
-      }
-
-      if (ev.kind === "button" && ev.id === "menu_pedido") {
-        // pergunta entrega/retirada com botões
-        state.step = "choose_order_type";
-        await sendButtons(phone, "Perfeito! É *entrega* ou *retirada*?", [
-          { id: "tipo_entrega", title: "🛵 Entrega" },
-          { id: "tipo_retirada", title: "🏃 Retirada" },
-        ]);
-        continue;
-      }
-
-      if (ev.kind === "button" && ev.id === "menu_atendente") {
-        state.step = "menu";
-        await sendText(phone, "👨‍🍳 Certo! Um atendente vai te chamar já já.\nEnquanto isso, você pode ver o cardápio: https://app.cardapioweb.com/pappi_pizza?s=dony");
-        continue;
-      }
-
-      // ===== ENTREGA / RETIRADA =====
-      if (ev.kind === "button" && ev.id === "tipo_entrega") {
-        state.orderType = "delivery";
-        state.step = "awaiting_delivery_address";
-        await sendText(phone, "🛵 *Entrega*\nMe mande:\n1) Rua e nº\n2) Bairro\n3) Referência");
-        continue;
-      }
-
-      if (ev.kind === "button" && ev.id === "tipo_retirada") {
-        state.orderType = "takeout";
-        state.step = "awaiting_order_text";
-        await sendText(phone, "🏃‍♂️ *Retirada*\nMe diga seu pedido (ex: *1 Calabresa grande + 1 Coca 2L*).");
-        continue;
-      }
-
-      // ===== CATÁLOGO: CATEGORIA SELECIONADA =====
-      if (ev.kind === "button" && ev.id.startsWith("cat_")) {
-        const categoryId = ev.id.replace("cat_", "");
-        state.selectedCategoryId = Number(categoryId);
-        state.step = "browsing_items";
-        await showItemsFromCategory(phone, categoryId);
-        continue;
-      }
-
-      // ===== CATÁLOGO: ITEM SELECIONADO =====
-      if (ev.kind === "button" && ev.id.startsWith("item_")) {
-        const itemId = ev.id.replace("item_", "");
-        state.step = "awaiting_order_text";
+      // ====== clique nos botões do menu ======
+      if (interactiveId === "MENU_CARDAPIO") {
+        session.step = "MENU";
         await sendText(
-          phone,
-          `✅ Perfeito! Você escolheu o item ID *${itemId}*.\nAgora me diga:\n- Tamanho (se tiver)\n- Observações\nEx: *Grande, sem cebola*`
+          from,
+          `📖 Cardápio online:\nhttps://app.cardapioweb.com/pappi_pizza?s=dony\n\nQuer pedir por aqui? Clique em *Fazer pedido* 😉`
         );
+        await showMainMenu(from);
         continue;
       }
 
-      // ===== SE ESTÁ ESPERANDO ENDEREÇO =====
-      if (state.step === "awaiting_delivery_address") {
-        state.addressText = rawText;
-        state.step = "awaiting_order_text";
-        await sendText(phone, "📍 Endereço recebido ✅\nAgora me diga seu pedido (ex: *1 Calabresa grande + 1 Coca 2L*).");
+      if (interactiveId === "MENU_PEDIDO") {
+        session.step = "ASK_ORDER_TYPE";
+        await askOrderType(from);
         continue;
       }
 
-      // ===== SE ESTÁ ESPERANDO PEDIDO =====
-      if (state.step === "awaiting_order_text") {
-        state.step = "menu";
-
-        const resumo =
-          `🧾 *Resumo do pedido*\n` +
-          `Tipo: *${state.orderType === "delivery" ? "Entrega" : "Retirada"}*\n` +
-          (state.orderType === "delivery" && state.addressText ? `Endereço: ${state.addressText}\n` : "") +
-          `Pedido: ${rawText}\n\n` +
-          `✅ Se estiver certo, responda: *CONFIRMAR*\n` +
-          `❌ Para corrigir, responda: *ALTERAR*`;
-
-        // guarda o texto pra confirmar
-        state.lastOrderText = rawText;
-        state.step = "awaiting_confirm";
-        await sendText(phone, resumo);
+      if (interactiveId === "MENU_ATENDENTE") {
+        session.step = "MENU";
+        await sendText(from, "👨‍🍳 Já te chamo um atendente! Enquanto isso, quer ver o *cardápio*?");
+        await showMainMenu(from);
         continue;
       }
 
-      // ===== CONFIRMAÇÃO =====
-      if (state.step === "awaiting_confirm") {
-        if (lower.includes("confirmar")) {
-          // Aqui você pode: criar pedido no seu sistema / chamar Cardápio Web "Pedidos via API" (quando for habilitar)
-          state.step = "menu";
-          await sendText(phone, "🔥 Pedido confirmado! Vou encaminhar para produção.\nSe precisar de mais algo, digite *menu*.");
-          continue;
+      // ====== tipo (entrega/retirada) ======
+      if (interactiveId === "TYPE_DELIVERY") {
+        session.orderType = "delivery";
+        session.step = "ASK_ADDRESS";
+        await askAddress(from);
+        continue;
+      }
+
+      if (interactiveId === "TYPE_TAKEOUT") {
+        session.orderType = "takeout";
+        session.addressText = "";
+        session.step = "ASK_SIZE";
+        await askSize(from);
+        continue;
+      }
+
+      // ====== endereço (texto livre) ======
+      if (session.step === "ASK_ADDRESS") {
+        // salva endereço como texto por enquanto
+        session.addressText = text || "";
+        session.step = "ASK_SIZE";
+        await sendText(from, "📍 Endereço recebido ✅");
+        await askSize(from);
+        continue;
+      }
+
+      // ====== tamanho ======
+      if (
+        interactiveId === "SIZE_BROTINHO_4" ||
+        interactiveId === "SIZE_GRANDE_8" ||
+        interactiveId === "SIZE_GIGANTE_16"
+      ) {
+        session.size =
+          interactiveId === "SIZE_BROTINHO_4"
+            ? "BROTINHO_4"
+            : interactiveId === "SIZE_GRANDE_8"
+            ? "GRANDE_8"
+            : "GIGANTE_16";
+
+        session.step = "ASK_FLAVOR";
+
+        // puxa sabores do catálogo e mostra lista
+        try {
+          await showFlavorsList(from);
+        } catch (e) {
+          console.error("Catalog error:", e?.message, e?.payload || "");
+          await sendText(
+            from,
+            "Não consegui puxar os sabores agora 😕\nMas você pode escolher pelo link:\nhttps://app.cardapioweb.com/pappi_pizza?s=dony"
+          );
         }
-
-        if (lower.includes("alterar")) {
-          state.step = "awaiting_order_text";
-          await sendText(phone, "Sem problema 🙂\nMe diga novamente o pedido (ex: *1 Calabresa grande + 1 Coca 2L*).");
-          continue;
-        }
-
-        await sendText(phone, "Responda *CONFIRMAR* ou *ALTERAR* 🙂");
         continue;
       }
 
-      // ===== FALLBACK =====
-      await showMainMenu(phone);
+      // ====== seleção de sabor (LIST) ======
+      if (interactiveId && String(interactiveId).startsWith("FLAVOR_")) {
+        const itemId = Number(String(interactiveId).replace("FLAVOR_", ""));
+        session.flavorItemId = Number.isFinite(itemId) ? itemId : null;
+        session.flavorName = interactiveTitle || "Sabor selecionado";
+        session.step = "CONFIRM";
+
+        await showOrderSummary(from, session);
+        continue;
+      }
+
+      // ====== confirmação ======
+      if (normalizeText(text) === "confirmar" && session.step === "CONFIRM") {
+        // Aqui você pode: criar pedido no Cardápio Web (se existir endpoint) ou mandar para humano
+        await sendText(
+          from,
+          "✅ Perfeito! Pedido confirmado.\nJá vamos preparar e te chamar para finalizar o pagamento/entrega."
+        );
+        resetSession(from);
+        await showMainMenu(from);
+        continue;
+      }
+
+      if (normalizeText(text) === "alterar" && session.step === "CONFIRM") {
+        session.step = "ASK_ORDER_TYPE";
+        session.orderType = null;
+        session.addressText = "";
+        session.size = null;
+        session.flavorItemId = null;
+        session.flavorName = null;
+        await sendText(from, "Sem problema 🙂 Vamos refazer rapidinho.");
+        await askOrderType(from);
+        continue;
+      }
+
+      // ====== fallback inteligente ======
+      // se o usuário digitar "cardapio"
+      if (normalized === "cardapio" || normalized === "cardápio") {
+        await sendText(
+          from,
+          `📖 Cardápio online:\nhttps://app.cardapioweb.com/pappi_pizza?s=dony\n\nQuer pedir por aqui? Clique em *Fazer pedido* 😉`
+        );
+        await showMainMenu(from);
+        continue;
+      }
+
+      // se chegou aqui e não entendeu, mostra menu
+      if (!text && !interactiveId) continue;
+
+      // mantém “conversa humana” e guia pra botões
+      await sendText(
+        from,
+        "Entendi 🙂\nPra ficar fácil e rápido, escolhe uma opção aqui embaixo:"
+      );
+      await showMainMenu(from);
     }
   } catch (err) {
-    console.error("Webhook error:", err?.message, err?.payload || "");
+    console.error("Webhook error:", err?.message, err?.payload || err);
   }
 });
 
-// ===== PROTECTED INTERNAL (opcional) =====
-app.get("/internal/ping", requireApiKey, (req, res) => {
-  res.json({ ok: true, time: nowIso() });
-});
-
-// ===== RUN =====
-const PORT = process.env.PORT || 3000;
+// ===== Run =====
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log("🔥 Pappi Pizza API rodando na porta", PORT));
+

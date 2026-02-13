@@ -1,5 +1,5 @@
 /**
- * Pappi Pizza API - WhatsApp Cloud + Cardápio Web + Google Maps
+ * Pappi Pizza API - WhatsApp Cloud + Cardápio Web + Google Maps (Lista de Opções)
  * Versão: ActionsGPT PRO (Humanizada & Validada)
  * Node 18+ (fetch nativo)
  */
@@ -12,7 +12,7 @@ app.use(express.json({ limit: "10mb" }));
 
 // ===== 1. CONFIGURAÇÕES E CHAVES =====
 
-// Suas chaves (já configuradas conforme conversa anterior)
+// Suas chaves (já configuradas)
 const GOOGLE_MAPS_KEY = process.env.GOOGLE_MAPS_KEY || "AIzaSyBx8S4Rxzj3S74knuSrwnsJqEM1WCDKLj0"; 
 const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID || "939101245961363"; 
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN || ""; // Configure no Render (Environment Variables)
@@ -53,9 +53,9 @@ function deg2rad(deg) { return deg * (Math.PI / 180); }
 
 // ===== 3. INTEGRAÇÕES =====
 
-// --- Google Maps (Aprimorado) ---
+// --- Google Maps (Retorna Lista de Opções) ---
 async function googleGeocode(address) {
-  if (!GOOGLE_MAPS_KEY) return null;
+  if (!GOOGLE_MAPS_KEY) return [];
 
   // Se o cliente não digitou "Campinas", forçamos a busca na cidade
   let query = address;
@@ -71,17 +71,17 @@ async function googleGeocode(address) {
     const data = await resp.json();
     
     if (data.status === "OK" && data.results.length > 0) {
-      const res = data.results[0];
-      return {
+      // Retorna até 5 resultados para o cliente escolher
+      return data.results.slice(0, 5).map(res => ({
         formatted: res.formatted_address,
         location: res.geometry.location, // { lat, lng }
         placeId: res.place_id
-      };
+      }));
     }
   } catch (e) {
     console.error("Erro Google Maps:", e);
   }
-  return null;
+  return [];
 }
 
 // --- Cardápio Web ---
@@ -185,7 +185,38 @@ function resetSession(from) {
   sessions.set(from, { step: "MENU" });
 }
 
-// ===== 5. WEBHOOK DO WHATSAPP =====
+// ===== 5. LÓGICA DE CONFIRMAÇÃO DE ENDEREÇO (Auxiliar) =====
+async function confirmLocation(from, session, geoData) {
+    // Salva o endereço escolhido na sessão definitiva
+    session.addressData = geoData;
+
+    // Calcula distância
+    const dist = getDistanceFromLatLonInKm(
+        STORE_LOCATION.lat, STORE_LOCATION.lng,
+        geoData.location.lat, geoData.location.lng
+    );
+
+    // Validação de Raio
+    if (dist > MAX_DELIVERY_RADIUS_KM) {
+        await sendLocationImage(from, geoData.location.lat, geoData.location.lng, "Local encontrado");
+        await sendText(from, `⚠️ O endereço *${geoData.formatted}* fica a *${dist.toFixed(1)}km* da loja.\n(Raio de entrega: ${MAX_DELIVERY_RADIUS_KM}km).\nA entrega pode ter taxa extra ou não ser possível.`);
+        
+        await sendButtons(from, "Deseja continuar?", [
+            { id: "ADDR_CONFIRM", title: "Sim, Continuar" },
+            { id: "ADDR_RETRY", title: "Não, Corrigir" }
+        ]);
+    } else {
+        await sendLocationImage(from, geoData.location.lat, geoData.location.lng, "Confirme o local");
+        await sendText(from, `✅ Localizado: *${geoData.formatted}*\n(Distância: ${dist.toFixed(1)}km)`);
+        
+        await sendButtons(from, "Este é o local correto?", [
+            { id: "ADDR_CONFIRM", title: "Sim, Confirmar" },
+            { id: "ADDR_RETRY", title: "Não, Corrigir" }
+        ]);
+    }
+}
+
+// ===== 6. WEBHOOK DO WHATSAPP =====
 app.get("/webhook", (req, res) => {
   if (
     req.query["hub.mode"] === "subscribe" &&
@@ -276,53 +307,58 @@ app.post("/webhook", async (req, res) => {
             // 1. Validação básica de tamanho (evita "oi", ".", "rua 1")
             if (input.length < 5) {
                 await sendText(from, "❌ Endereço muito curto ou inválido.\nPor favor, digite: *Rua, Número e Bairro*.");
-                return; // PARE AQUI. Não avança.
+                return;
             }
 
-            await sendText(from, "🔎 Verificando endereço no Google Maps...");
+            await sendText(from, "🔎 Pesquisando endereços...");
             
-            // Chama a função atualizada (forçando Campinas)
-            const geoData = await googleGeocode(text);
+            // Busca LISTA de endereços
+            const results = await googleGeocode(text);
             
-            // 2. Se o Google não achou nada, BLOQUEIA.
-            if (!geoData) {
-                await sendText(from, "❌ Não consegui localizar esse endereço no mapa.\n\nTente digitar mais completo:\n*Ex: Rua das Flores, 123, Jardim Bandeira*");
-                return; // PARE AQUI.
+            // 2. Se o Google não achou nada
+            if (results.length === 0) {
+                await sendText(from, "❌ Não consegui localizar esse endereço.\nTente digitar mais completo:\n*Ex: Rua das Flores, 123, Jardim Bandeira*");
+                return;
             }
 
-            // Salva dados na sessão temporariamente
-            session.addressData = geoData;
-            
-            // 3. Calcula distância
-            const dist = getDistanceFromLatLonInKm(
-                STORE_LOCATION.lat, STORE_LOCATION.lng,
-                geoData.location.lat, geoData.location.lng
-            );
-
-            // 4. Validação de Raio (12km)
-            if (dist > MAX_DELIVERY_RADIUS_KM) {
-                await sendLocationImage(from, geoData.location.lat, geoData.location.lng, "Local encontrado");
-                await sendText(from, `⚠️ O endereço *${geoData.formatted}* fica a ${dist.toFixed(1)}km da loja.\n\nNosso raio padrão é ${MAX_DELIVERY_RADIUS_KM}km. A entrega pode ter taxa extra ou não ser possível.`);
-                
-                await sendButtons(from, "Deseja continuar mesmo assim?", [
-                    { id: "ADDR_CONFIRM", title: "Sim, Continuar" },
-                    { id: "ADDR_RETRY", title: "Digitar Outro" }
-                ]);
-            } else {
-                await sendLocationImage(from, geoData.location.lat, geoData.location.lng, "É aqui mesmo?");
-                await sendText(from, `✅ Encontrei: *${geoData.formatted}*\n(Distância: ${dist.toFixed(1)}km)`);
-                
-                await sendButtons(from, "O endereço está correto?", [
-                    { id: "ADDR_CONFIRM", title: "Sim, Confirmar" },
-                    { id: "ADDR_RETRY", title: "Não, Corrigir" }
-                ]);
+            // 3. SE ACHOU SÓ UM: Vai direto para confirmação
+            if (results.length === 1) {
+                await confirmLocation(from, session, results[0]);
+                return;
             }
-            continue;
+
+            // 4. SE ACHOU VÁRIOS: Manda Lista para escolher
+            session.candidateAddresses = results; // Salva opções
+            
+            const rows = results.map((addr, index) => ({
+                id: `ADDR_OPT_${index}`, 
+                title: (addr.formatted.split(",")[0] || "Opção").slice(0, 23), // Título curto
+                description: addr.formatted.slice(0, 70) // Descrição longa
+            }));
+
+            await sendList(from, "Encontrei alguns endereços. Qual deles é o seu?", "Selecionar Local", [{ title: "Opções Encontradas", rows }]);
+            return;
         }
 
+        // --- RESPOSTA DA LISTA DE ENDEREÇOS ---
+        if (interactiveId && interactiveId.startsWith("ADDR_OPT_")) {
+            const index = parseInt(interactiveId.replace("ADDR_OPT_", ""));
+            const chosenAddr = session.candidateAddresses ? session.candidateAddresses[index] : null;
+
+            if (!chosenAddr) {
+                await sendText(from, "Erro ao selecionar. Digite o endereço novamente.");
+                session.step = "ASK_ADDRESS";
+                return;
+            }
+
+            await confirmLocation(from, session, chosenAddr);
+            return;
+        }
+
+        // --- CONFIRMAÇÃO FINAL DO ENDEREÇO ---
         if (interactiveId === "ADDR_RETRY") {
             session.step = "ASK_ADDRESS";
-            await sendText(from, "Ok, digite o endereço novamente:");
+            await sendText(from, "Tudo bem! Digite o endereço novamente (Rua, Número e Bairro):");
             continue;
         }
 
@@ -334,7 +370,6 @@ app.post("/webhook", async (req, res) => {
         }
 
         // --- FLUXO: CATÁLOGO (CATEGORIAS) ---
-        // A função startCatalogFlow chama isso.
         
         // --- SELEÇÃO DE ITEM/SABOR ---
         if (interactiveId && interactiveId.startsWith("CAT_")) {
@@ -396,7 +431,7 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// ===== 6. LÓGICA DO CATÁLOGO AUXILIAR =====
+// ===== 7. LÓGICA DO CATÁLOGO AUXILIAR =====
 
 async function startCatalogFlow(from) {
     const catalog = await getCatalog();
@@ -454,7 +489,7 @@ async function confirmOrder(from, session) {
     ]);
 }
 
-// ===== 7. ROTAS PÚBLICAS (Health Check) =====
+// ===== 8. ROTAS PÚBLICAS (Health Check) =====
 app.get("/health", (req, res) => {
   res.json({ 
       status: "online", 

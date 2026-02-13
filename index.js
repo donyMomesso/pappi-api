@@ -1,618 +1,449 @@
 /**
- * Pappi API - WhatsApp Cloud + Cardápio Web (catálogo) + Botões
+ * Pappi Pizza API - WhatsApp Cloud + Cardápio Web + Google Maps
+ * Versão: ActionsGPT PRO (Humanizada)
  * Node 18+ (fetch nativo)
- *
- * ✅ O que este index já faz:
- * - /health e /debug-auth
- * - Webhook GET/POST da Meta
- * - Botões (reply buttons) e lista (list message)
- * - Fluxo básico: Menu -> Cardápio / Fazer pedido / Atendente
- * - Fazer pedido -> Entrega/Retirada -> Endereço -> Tamanho -> Sabores (puxa do Catálogo Cardápio Web)
- *
- * ⚠️ Observação:
- * - Botões aceitam até 3 por mensagem (limite do WhatsApp).
- * - Lista é melhor para muitos sabores/categorias.
  */
 
 const express = require("express");
-
 const app = express();
-app.use(express.json({ limit: "2mb" }));
 
-// ===== ENV =====
-const API_KEY = process.env.ATTENDANT_API_KEY || "";
+// Aumentando limite para receber JSON do WhatsApp
+app.use(express.json({ limit: "10mb" }));
 
-const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN || "";
-const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID || "";
-const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN || "";
+// ===== 1. CONFIGURAÇÕES E CHAVES =====
 
-const CARDAPIOWEB_BASE_URL =
-  process.env.CARDAPIOWEB_BASE_URL || "https://integracao.cardapioweb.com";
-const CARDAPIOWEB_TOKEN = process.env.CARDAPIOWEB_TOKEN || "";
-const CARDAPIOWEB_STORE_ID = process.env.CARDAPIOWEB_STORE_ID || ""; // opcional (se a API exigir)
+// Suas chaves fornecidas
+const GOOGLE_MAPS_KEY = process.env.GOOGLE_MAPS_KEY || "AIzaSyBx8S4Rxzj3S74knuSrwnsJqEM1WCDKLj0"; 
+const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID || "939101245961363"; 
+const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN || ""; // Configure no Render
+const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN || "pappi_verify_token";
 
-function nowIso() {
-  return new Date().toISOString();
-}
+// Configuração Cardápio Web
+const CARDAPIOWEB_BASE_URL = "https://integracao.cardapioweb.com";
+const CARDAPIOWEB_TOKEN = process.env.CARDAPIOWEB_TOKEN || ""; 
 
-function normalizeText(s) {
-  return (s || "")
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/\p{Diacritic}/gu, "")
-    .trim();
-}
+// Configuração da Loja (Pappi Pizza - Campinas)
+// Coordenadas aproximadas de Campinas (Centro) para cálculo de raio. 
+// O ideal é pegar a lat/long exata da sua loja no Google Maps e substituir aqui.
+const STORE_LOCATION = { lat: -22.90556, lng: -47.06083 }; 
+const MAX_DELIVERY_RADIUS_KM = 12;
+
+// ===== 2. FUNÇÕES ÚTEIS (HELPERS) =====
 
 function digitsOnly(s) {
   return String(s || "").replace(/\D/g, "");
 }
 
-// ===== HEALTH / DEBUG =====
-app.get("/", (req, res) => res.status(200).send("Pappi API online ✅"));
+function normalizeText(s) {
+  return (s || "").toLowerCase().normalize("NFD").replace(/\p{Diacritic}/gu, "").trim();
+}
 
-app.get("/health", (req, res) => {
-  res.status(200).json({ ok: true, app: "API da Pappi Pizza", time: nowIso() });
-});
+// Cálculo de distância simples (Haversine)
+function getDistanceFromLatLonInKm(lat1, lon1, lat2, lon2) {
+  const R = 6371; // Raio da terra em km
+  const dLat = deg2rad(lat2 - lat1);
+  const dLon = deg2rad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(deg2rad(lat1)) * Math.cos(deg2rad(lat2)) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+function deg2rad(deg) { return deg * (Math.PI / 180); }
 
-app.get("/debug-auth", (req, res) => {
-  const headerKey = req.header("X-API-Key") || "";
-  res.status(200).json({
-    ok: true,
-    hasEnvAttendantKey: Boolean(process.env.ATTENDANT_API_KEY),
-    attendantKeyLength: (process.env.ATTENDANT_API_KEY || "").length,
-    hasHeaderKey: Boolean(headerKey),
-    headerKeyLength: headerKey.length,
-    hasWhatsappToken: Boolean(WHATSAPP_TOKEN),
-    hasWhatsappPhoneNumberId: Boolean(WHATSAPP_PHONE_NUMBER_ID),
-    hasWebhookVerifyToken: Boolean(WEBHOOK_VERIFY_TOKEN),
-    cardapioWebBaseUrl: CARDAPIOWEB_BASE_URL,
-    hasCardapioWebToken: Boolean(CARDAPIOWEB_TOKEN),
-    hasCardapioWebStoreId: Boolean(CARDAPIOWEB_STORE_ID),
+// ===== 3. INTEGRAÇÕES =====
+
+// --- Google Maps ---
+async function googleGeocode(address) {
+  if (!GOOGLE_MAPS_KEY) return null;
+  // Adiciona "Campinas" se o cliente não digitar, para ajudar o Google
+  const query = address.toLowerCase().includes("campinas") ? address : `${address}, Campinas - SP`;
+  
+  const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(query)}&key=${GOOGLE_MAPS_KEY}`;
+  
+  try {
+    const resp = await fetch(url);
+    const data = await resp.json();
+    
+    if (data.status === "OK" && data.results.length > 0) {
+      const res = data.results[0];
+      return {
+        formatted: res.formatted_address,
+        location: res.geometry.location, // { lat, lng }
+        placeId: res.place_id
+      };
+    }
+  } catch (e) {
+    console.error("Erro Google Maps:", e);
+  }
+  return null;
+}
+
+// --- Cardápio Web ---
+async function getCatalog() {
+  if (!CARDAPIOWEB_TOKEN) return null;
+  const url = `${CARDAPIOWEB_BASE_URL}/api/partner/v1/catalog`;
+  
+  try {
+    const resp = await fetch(url, {
+      headers: { 
+        "X-API-KEY": CARDAPIOWEB_TOKEN,
+        "Accept": "application/json"
+      }
+    });
+    if (!resp.ok) return null;
+    return await resp.json();
+  } catch (e) {
+    console.error("Erro Cardápio Web:", e);
+    return null;
+  }
+}
+
+// --- WhatsApp Envio ---
+async function waSend(to, payload) {
+  if (!WHATSAPP_TOKEN) return console.error("Sem WHATSAPP_TOKEN");
+  const url = `https://graph.facebook.com/v24.0/${WHATSAPP_PHONE_NUMBER_ID}/messages`;
+  
+  try {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${WHATSAPP_TOKEN}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to: digitsOnly(to),
+        ...payload
+      })
+    });
+    return await resp.json();
+  } catch (e) {
+    console.error("Erro envio WA:", e);
+  }
+}
+
+async function sendText(to, text) {
+  return waSend(to, { type: "text", text: { body: text } });
+}
+
+async function sendButtons(to, text, buttons) {
+  return waSend(to, {
+    type: "interactive",
+    interactive: {
+      type: "button",
+      body: { text: text },
+      action: {
+        buttons: buttons.slice(0, 3).map(b => ({
+          type: "reply",
+          reply: { id: b.id, title: b.title.slice(0, 20) }
+        }))
+      }
+    }
   });
-});
+}
 
-// ===== In-memory session (simples) =====
-/**
- * sessions.get(phone) = {
- *   step: "MENU" | "ASK_ORDER_TYPE" | "ASK_ADDRESS" | "ASK_SIZE" | "ASK_FLAVOR" | "CONFIRM",
- *   orderType: "delivery" | "takeout",
- *   addressText: string,
- *   size: "BROTINHO_4" | "GRANDE_8" | "GIGANTE_16",
- *   flavorItemId: number | null,
- *   flavorName: string | null,
- * }
- */
+async function sendList(to, text, buttonText, sections) {
+  return waSend(to, {
+    type: "interactive",
+    interactive: {
+      type: "list",
+      body: { text: text },
+      action: {
+        button: buttonText.slice(0, 20),
+        sections: sections
+      }
+    }
+  });
+}
+
+async function sendLocationImage(to, lat, lng, caption) {
+    // Envia uma imagem estática do mapa para confirmação visual
+    const mapUrl = `https://maps.googleapis.com/maps/api/staticmap?center=${lat},${lng}&zoom=15&size=600x300&maptype=roadmap&markers=color:red%7C${lat},${lng}&key=${GOOGLE_MAPS_KEY}`;
+    return waSend(to, {
+        type: "image",
+        image: { link: mapUrl, caption: caption }
+    });
+}
+
+// ===== 4. GERENCIAMENTO DE SESSÃO =====
 const sessions = new Map();
 
 function getSession(from) {
-  if (!sessions.has(from)) sessions.set(from, { step: "MENU" });
+  if (!sessions.has(from)) {
+    sessions.set(from, { step: "MENU" });
+  }
   return sessions.get(from);
 }
 
 function resetSession(from) {
   sessions.set(from, { step: "MENU" });
-  return sessions.get(from);
 }
 
-// ===== Cardápio Web (helper) =====
-async function cardapioWebFetch(path, { method = "GET", body } = {}) {
-  if (!CARDAPIOWEB_TOKEN) {
-    throw new Error("CARDAPIOWEB_TOKEN não configurado no Render (Environment).");
-  }
-
-  const url = `${CARDAPIOWEB_BASE_URL}${path}`;
-  const headers = {
-    "X-API-KEY": CARDAPIOWEB_TOKEN,
-    "Content-Type": "application/json",
-    Accept: "application/json",
-  };
-
-  // algumas integrações exigem store_id em header (depende da sua conta/doc)
-  if (CARDAPIOWEB_STORE_ID) headers["X-STORE-ID"] = String(CARDAPIOWEB_STORE_ID);
-
-  const resp = await fetch(url, {
-    method,
-    headers,
-    body: body ? JSON.stringify(body) : undefined,
-  });
-
-  const text = await resp.text();
-  let data = null;
-  try {
-    data = text ? JSON.parse(text) : null;
-  } catch {
-    data = { raw: text };
-  }
-
-  if (!resp.ok) {
-    const msg = data?.message || data?.error || text || "Erro Cardápio Web";
-    const err = new Error(msg);
-    err.status = resp.status;
-    err.payload = data;
-    throw err;
-  }
-  return data;
-}
-
-// ✅ endpoint que você mostrou (produção):
-// GET /api/partner/v1/catalog
-async function getCatalog() {
-  // se sua rota for outra, ajuste aqui:
-  return cardapioWebFetch(`/api/partner/v1/catalog`);
-}
-
-// Monta lista de pizzas por categoria (primeira categoria com "pizza")
-async function getPizzaCategoryFromCatalog() {
-  const catalog = await getCatalog();
-  const categories = catalog?.categories || [];
-  const pizzaCat =
-    categories.find((c) => normalizeText(c?.name).includes("pizza")) ||
-    categories[0];
-
-  const items = (pizzaCat?.items || []).filter((it) => it?.status === "ACTIVE");
-  return { pizzaCategory: pizzaCat, items };
-}
-
-// ===== WhatsApp Cloud (helpers) =====
-async function waSend(payload) {
-  if (!WHATSAPP_TOKEN || !WHATSAPP_PHONE_NUMBER_ID) {
-    throw new Error("WHATSAPP_TOKEN ou WHATSAPP_PHONE_NUMBER_ID não configurados.");
-  }
-
-  const url = `https://graph.facebook.com/v24.0/${WHATSAPP_PHONE_NUMBER_ID}/messages`;
-
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
-
-  const data = await resp.json().catch(() => ({}));
-  if (!resp.ok) {
-    const msg =
-      data?.error?.message || data?.message || `Erro WhatsApp (${resp.status})`;
-    const err = new Error(msg);
-    err.status = resp.status;
-    err.payload = data;
-    throw err;
-  }
-  return data;
-}
-
-async function sendText(to, text) {
-  return waSend({
-    messaging_product: "whatsapp",
-    to: digitsOnly(to),
-    type: "text",
-    text: { body: text },
-  });
-}
-
-// ✅ Reply Buttons (máx 3)
-async function sendButtons(to, bodyText, buttons /* [{id,title}] */) {
-  return waSend({
-    messaging_product: "whatsapp",
-    to: digitsOnly(to),
-    type: "interactive",
-    interactive: {
-      type: "button",
-      body: { text: bodyText },
-      action: {
-        buttons: buttons.slice(0, 3).map((b) => ({
-          type: "reply",
-          reply: { id: b.id, title: b.title.slice(0, 20) },
-        })),
-      },
-    },
-  });
-}
-
-// ✅ Lista (bom pra muitos sabores)
-async function sendList(to, bodyText, buttonText, sections /* [{title, rows}] */) {
-  return waSend({
-    messaging_product: "whatsapp",
-    to: digitsOnly(to),
-    type: "interactive",
-    interactive: {
-      type: "list",
-      body: { text: bodyText },
-      action: {
-        button: buttonText.slice(0, 20),
-        sections: sections.slice(0, 10).map((s) => ({
-          title: (s.title || "Opções").slice(0, 24),
-          rows: (s.rows || []).slice(0, 10).map((r) => ({
-            id: String(r.id).slice(0, 200),
-            title: String(r.title || "").slice(0, 24),
-            description: r.description ? String(r.description).slice(0, 72) : undefined,
-          })),
-        })),
-      },
-    },
-  });
-}
-
-// Extrai mensagens do webhook
-function extractIncomingMessages(body) {
-  const out = [];
-  const entry = body?.entry || [];
-  for (const e of entry) {
-    const changes = e?.changes || [];
-    for (const c of changes) {
-      const value = c?.value;
-      const messages = value?.messages || [];
-      for (const m of messages) {
-        out.push({
-          from: m.from,
-          id: m.id,
-          type: m.type,
-          text: m.text?.body || "",
-          interactive:
-            m.interactive?.button_reply ||
-            m.interactive?.list_reply ||
-            null,
-          raw: m,
-        });
-      }
-    }
-  }
-  return out;
-}
-
-// ===== MENUS =====
-async function showMainMenu(to) {
-  await sendButtons(to, "🍕 Pappi Pizza\nComo posso te ajudar?", [
-    { id: "MENU_CARDAPIO", title: "📖 Cardápio" },
-    { id: "MENU_PEDIDO", title: "🛒 Fazer pedido" },
-    { id: "MENU_ATENDENTE", title: "👨‍🍳 Atendente" },
-  ]);
-}
-
-async function askOrderType(to) {
-  await sendButtons(to, "Perfeito! É entrega ou retirada?", [
-    { id: "TYPE_DELIVERY", title: "🛵 Entrega" },
-    { id: "TYPE_TAKEOUT", title: "🏃 Retirada" },
-    { id: "BACK_MENU", title: "⬅️ Menu" },
-  ]);
-}
-
-async function askAddress(to) {
-  await sendText(
-    to,
-    "🛵 *Entrega*\nMe mande:\n1) Rua e nº\n2) Bairro\n3) Referência (opcional)\n\nEx: Rua X, 123 - Jardim Bandeira II"
-  );
-}
-
-async function askSize(to) {
-  await sendButtons(to, "Show! Agora escolha o tamanho:", [
-    { id: "SIZE_BROTINHO_4", title: "🍕 Brotinho (4)" },
-    { id: "SIZE_GRANDE_8", title: "🍕 Grande (8)" },
-    { id: "SIZE_GIGANTE_16", title: "🍕 Gigante (16)" },
-  ]);
-}
-
-async function showFlavorsList(to) {
-  const { pizzaCategory, items } = await getPizzaCategoryFromCatalog();
-
-  // 10 por seção (limite). Se tiver mais, corta (depois a gente pagina).
-  const rows = items.slice(0, 10).map((it) => ({
-    id: `FLAVOR_${it.id}`,
-    title: it.name,
-    description: it.description ? it.description.slice(0, 60) : " ",
-  }));
-
-  await sendList(
-    to,
-    `🍕 Escolha o sabor (${pizzaCategory?.name || "Pizzas"})`,
-    "Ver sabores",
-    [{ title: "Sabores", rows }]
-  );
-}
-
-async function showOrderSummary(to, session) {
-  const tipo = session.orderType === "delivery" ? "Entrega" : "Retirada";
-  const tamanho =
-    session.size === "BROTINHO_4"
-      ? "Brotinho (4)"
-      : session.size === "GRANDE_8"
-      ? "Grande (8)"
-      : "Gigante (16)";
-
-  const resumo =
-    `🧾 *Resumo do pedido*\n` +
-    `Tipo: *${tipo}*\n` +
-    (session.orderType === "delivery"
-      ? `Endereço: *${session.addressText || "—"}*\n`
-      : "") +
-    `Tamanho: *${tamanho}*\n` +
-    `Sabor: *${session.flavorName || "—"}*\n\n` +
-    `✅ Se estiver certo, responda: *CONFIRMAR*\n` +
-    `❌ Para corrigir, responda: *ALTERAR*`;
-
-  await sendText(to, resumo);
-}
-// ===== Webhook Cardápio Web (sem polling) =====
-const CARDAPIOWEB_WEBHOOK_TOKEN = process.env.CARDAPIOWEB_WEBHOOK_TOKEN || "";
-
-// Recomendado: cache telefone por pedido (se pedido veio do WhatsApp)
-const orderPhoneCache = new Map(); // orderId -> phone (digits only)
-
-// Função auxiliar: tenta descobrir telefone do cliente do pedido
-function getPhoneFromOrder(order) {
-  const phone = order?.customer?.phone;
-  return phone ? digitsOnly(phone) : null;
-}
-
-// Rota que o Cardápio Web vai chamar (configure no Portal)
-app.post("/cardapioweb/webhook", async (req, res) => {
-  // 1) Responder rápido 200 (até 5s) — e processar em seguida
-  res.status(200).json({ ok: true });
-
-  try {
-    // 2) valida token opcional
-    if (CARDAPIOWEB_WEBHOOK_TOKEN) {
-      const token = req.header("X-Webhook-Token") || "";
-      if (token !== CARDAPIOWEB_WEBHOOK_TOKEN) {
-        console.warn("Webhook Cardápio Web: token inválido");
-        return;
-      }
-    }
-
-    // 3) payload do webhook (pode variar; vamos ser flexíveis)
-    const body = req.body || {};
-    const event = body.event || body.type || body.action || "unknown";
-    const resource = body.resource || body.entity || "unknown";
-
-    // tenta achar order_id em campos comuns
-    const orderId =
-      body?.order_id ||
-      body?.resource_id ||
-      body?.data?.order_id ||
-      body?.data?.id ||
-      body?.order?.id ||
-      body?.id ||
-      null;
-
-    if (!orderId) {
-      console.log("Webhook Cardápio Web recebido, mas sem orderId:", { event, resource });
-      return;
-    }
-
-    // 4) busca o pedido completo no Cardápio Web
-    let order = null;
-    try {
-      order = await getOrderById(orderId); // usa a função que você já colocou
-    } catch (e) {
-      console.error("Falha ao buscar pedido no Cardápio Web:", e?.message, e?.payload || "");
-      return;
-    }
-
-    // 5) determina telefone para avisar
-    let toPhone = getPhoneFromOrder(order);
-
-    // fallback: se pedido não tem customer, tenta cache (quando veio do WhatsApp)
-    if (!toPhone && orderPhoneCache.has(String(orderId))) {
-      toPhone = orderPhoneCache.get(String(orderId));
-    }
-
-    if (!toPhone) {
-      console.log("Pedido sem telefone de cliente. orderId:", orderId);
-      return;
-    }
-
-    // 6) manda mensagem baseada no status atual
-    const msg = formatOrderStatus(order); // usa sua função de status
-    await sendText(toPhone, msg);
-
-    // 7) acalma se estiver em preparo
-    if (order?.status === "confirmed") {
-      await sendText(
-        toPhone,
-        "🙏 Já está em preparo. Assim que mudar no sistema, eu te aviso por aqui."
-      );
-    }
-  } catch (err) {
-    console.error("cardapioweb webhook error:", err?.message, err?.payload || err);
-  }
-});
-
-// ===== WEBHOOK META =====
+// ===== 5. WEBHOOK DO WHATSAPP =====
 app.get("/webhook", (req, res) => {
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
-
-  if (mode === "subscribe" && token === WEBHOOK_VERIFY_TOKEN) {
-    return res.status(200).send(challenge);
+  if (
+    req.query["hub.mode"] === "subscribe" &&
+    req.query["hub.verify_token"] === WEBHOOK_VERIFY_TOKEN
+  ) {
+    res.status(200).send(req.query["hub.challenge"]);
+  } else {
+    res.sendStatus(403);
   }
-  return res.sendStatus(403);
 });
 
 app.post("/webhook", async (req, res) => {
-  // WhatsApp quer 200 rápido
-  res.sendStatus(200);
+  res.sendStatus(200); // Responde rápido para o Meta
 
-  try {
-    const msgs = extractIncomingMessages(req.body);
+  const body = req.body;
+  if (!body.entry) return;
 
-    for (const msg of msgs) {
-      const from = msg.from;
+  for (const entry of body.entry) {
+    for (const change of entry.changes || []) {
+      const value = change.value;
+      if (!value.messages) continue;
 
-      // texto ou clique em botão/lista
-      const text = (msg.text || "").trim();
-      const interactiveId =
-        msg.interactive?.id || msg.interactive?.payload || null; // payload no list_reply pode variar
-      const interactiveTitle = msg.interactive?.title || null;
+      for (const msg of value.messages) {
+        const from = msg.from;
+        const msgType = msg.type;
+        const text = msg.text?.body || "";
+        // Pega ID de botão ou lista
+        const interactiveId = msg.interactive?.button_reply?.id || msg.interactive?.list_reply?.id;
+        const interactiveTitle = msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title;
+        
+        const session = getSession(from);
+        const input = normalizeText(text);
 
-      const session = getSession(from);
-
-      // ====== comandos universais ======
-      const normalized = normalizeText(text);
-      // ====== consulta automática de status ======
-const wantsStatus =
-  normalized.includes("status") ||
-  normalized.includes("meu pedido") ||
-  normalized.includes("cade") ||
-  normalized.includes("cadê") ||
-  normalized.includes("atras") ||
-  normalized.includes("demor");
-
-if (wantsStatus) {
-  await sendText(
-    from,
-    "🔎 Estou consultando o status do seu pedido no sistema...\n\nSe estiver com atraso, já te atualizo aqui 🙏"
-  );
-  continue;
-}
-      // reset
-      if (normalized === "menu" || normalized === "inicio" || interactiveId === "BACK_MENU") {
-        resetSession(from);
-        await showMainMenu(from);
-        continue;
-      }
-
-      // ====== clique nos botões do menu ======
-      if (interactiveId === "MENU_CARDAPIO") {
-        session.step = "MENU";
-        await sendText(
-          from,
-          `📖 Cardápio online:\nhttps://app.cardapioweb.com/pappi_pizza?s=dony\n\nQuer pedir por aqui? Clique em *Fazer pedido* 😉`
-        );
-        await showMainMenu(from);
-        continue;
-      }
-
-      if (interactiveId === "MENU_PEDIDO") {
-        session.step = "ASK_ORDER_TYPE";
-        await askOrderType(from);
-        continue;
-      }
-
-      if (interactiveId === "MENU_ATENDENTE") {
-        session.step = "MENU";
-        await sendText(from, "👨‍🍳 Já te chamo um atendente! Enquanto isso, quer ver o *cardápio*?");
-        await showMainMenu(from);
-        continue;
-      }
-
-      // ====== tipo (entrega/retirada) ======
-      if (interactiveId === "TYPE_DELIVERY") {
-        session.orderType = "delivery";
-        session.step = "ASK_ADDRESS";
-        await askAddress(from);
-        continue;
-      }
-
-      if (interactiveId === "TYPE_TAKEOUT") {
-        session.orderType = "takeout";
-        session.addressText = "";
-        session.step = "ASK_SIZE";
-        await askSize(from);
-        continue;
-      }
-
-      // ====== endereço (texto livre) ======
-      if (session.step === "ASK_ADDRESS") {
-        // salva endereço como texto por enquanto
-        session.addressText = text || "";
-        session.step = "ASK_SIZE";
-        await sendText(from, "📍 Endereço recebido ✅");
-        await askSize(from);
-        continue;
-      }
-
-      // ====== tamanho ======
-      if (
-        interactiveId === "SIZE_BROTINHO_4" ||
-        interactiveId === "SIZE_GRANDE_8" ||
-        interactiveId === "SIZE_GIGANTE_16"
-      ) {
-        session.size =
-          interactiveId === "SIZE_BROTINHO_4"
-            ? "BROTINHO_4"
-            : interactiveId === "SIZE_GRANDE_8"
-            ? "GRANDE_8"
-            : "GIGANTE_16";
-
-        session.step = "ASK_FLAVOR";
-
-        // puxa sabores do catálogo e mostra lista
-        try {
-          await showFlavorsList(from);
-        } catch (e) {
-          console.error("Catalog error:", e?.message, e?.payload || "");
-          await sendText(
-            from,
-            "Não consegui puxar os sabores agora 😕\nMas você pode escolher pelo link:\nhttps://app.cardapioweb.com/pappi_pizza?s=dony"
-          );
+        // --- COMANDOS GERAIS ---
+        if (input === "menu" || input === "oi" || input === "ola" || interactiveId === "BACK_MENU") {
+          resetSession(from);
+          await sendText(from, "👋 Olá! Bem-vindo à *Pappi Pizza* 🍕\n\nSou seu assistente virtual. Posso te ajudar a pedir pizza, consultar cardápio ou falar com um humano.");
+          await sendButtons(from, "Como deseja prosseguir?", [
+            { id: "BTN_PEDIR", title: "🛒 Fazer Pedido" },
+            { id: "BTN_CARDAPIO", title: "📖 Ver Cardápio" },
+            { id: "BTN_HUMANO", title: "👨‍🍳 Falar c/ Humano" }
+          ]);
+          continue;
         }
-        continue;
+
+        // --- FLUXO: INÍCIO ---
+        if (interactiveId === "BTN_PEDIR") {
+          session.step = "ORDER_TYPE";
+          await sendButtons(from, "Para começar: É entrega ou retirada?", [
+            { id: "TYPE_DELIVERY", title: "🛵 Entrega" },
+            { id: "TYPE_TAKEOUT", title: "🏃 Retirada" }
+          ]);
+          continue;
+        }
+
+        if (interactiveId === "BTN_CARDAPIO") {
+          await sendText(from, "Acesse nosso cardápio completo com fotos aqui:\nhttps://app.cardapioweb.com/pappi_pizza?s=dony");
+          await sendButtons(from, "Quer fazer o pedido por aqui agora?", [
+             { id: "BTN_PEDIR", title: "Sim, Fazer Pedido" },
+             { id: "BACK_MENU", title: "Voltar ao Início" }
+          ]);
+          continue;
+        }
+
+        // --- FLUXO: TIPO DE PEDIDO ---
+        if (interactiveId === "TYPE_DELIVERY") {
+          session.orderType = "delivery";
+          session.step = "ASK_ADDRESS";
+          await sendText(from, "📍 *Entrega*\nPor favor, digite seu endereço completo (Rua, Número e Bairro).\n\n_Ex: Rua Rodolfo Gortadello, 35, Jardim Bandeira II_");
+          continue;
+        }
+
+        if (interactiveId === "TYPE_TAKEOUT") {
+          session.orderType = "takeout";
+          session.step = "SELECT_CATEGORY";
+          await startCatalogFlow(from); // Pula validação de endereço
+          continue;
+        }
+
+        // --- FLUXO: VALIDAÇÃO DE ENDEREÇO (GOOGLE MAPS) ---
+        if (session.step === "ASK_ADDRESS" && !interactiveId) {
+            await sendText(from, "🔎 Verificando endereço no Google Maps...");
+            
+            const geoData = await googleGeocode(text);
+            
+            if (!geoData) {
+                await sendText(from, "😕 Não consegui achar esse endereço exato.\nPode tentar digitar de novo com Bairro e Cidade?");
+                return;
+            }
+
+            // Salva dados na sessão
+            session.addressData = geoData;
+            
+            // Calcula distância
+            const dist = getDistanceFromLatLonInKm(
+                STORE_LOCATION.lat, STORE_LOCATION.lng,
+                geoData.location.lat, geoData.location.lng
+            );
+
+            if (dist > MAX_DELIVERY_RADIUS_KM) {
+                await sendLocationImage(from, geoData.location.lat, geoData.location.lng, "Local encontrado");
+                await sendText(from, `⚠️ Esse endereço fica a aprox. *${dist.toFixed(1)}km* da loja.\nNosso raio de entrega padrão é ${MAX_DELIVERY_RADIUS_KM}km.\n\nPodemos tentar chamar um motoboy parceiro, mas a taxa pode variar.`);
+                await sendButtons(from, "Deseja continuar mesmo assim?", [
+                    { id: "ADDR_CONFIRM", title: "Sim, Continuar" },
+                    { id: "ADDR_RETRY", title: "Digitar Outro" }
+                ]);
+            } else {
+                await sendLocationImage(from, geoData.location.lat, geoData.location.lng, "É aqui mesmo?");
+                await sendText(from, `✅ Encontrei: *${geoData.formatted}*`);
+                await sendButtons(from, "O endereço está correto?", [
+                    { id: "ADDR_CONFIRM", title: "Sim, Confirmar" },
+                    { id: "ADDR_RETRY", title: "Corrigir" }
+                ]);
+            }
+            continue;
+        }
+
+        if (interactiveId === "ADDR_RETRY") {
+            session.step = "ASK_ADDRESS";
+            await sendText(from, "Ok, digite o endereço novamente:");
+            continue;
+        }
+
+        if (interactiveId === "ADDR_CONFIRM") {
+            session.step = "SELECT_CATEGORY";
+            await sendText(from, "Endereço anotado! 📝");
+            await startCatalogFlow(from);
+            continue;
+        }
+
+        // --- FLUXO: CATÁLOGO (CATEGORIAS) ---
+        // A função startCatalogFlow chama isso.
+        
+        // --- SELEÇÃO DE ITEM/SABOR ---
+        if (interactiveId && interactiveId.startsWith("CAT_")) {
+            // O usuário escolheu uma categoria (ex: Pizzas ou Bebidas)
+            const catId = interactiveId.replace("CAT_", "");
+            await showItemsFromCategory(from, catId);
+            continue;
+        }
+
+        // --- SELEÇÃO DE TAMANHO (Consciência) ---
+        if (interactiveId && interactiveId.startsWith("ITEM_")) {
+            // O usuário escolheu uma Pizza Específica (ex: Calabresa)
+            const itemId = interactiveId.replace("ITEM_", "");
+            session.selectedItemId = itemId;
+            session.selectedItemName = interactiveTitle;
+
+            // Se for bebida ou item sem tamanho variável, pula pra resumo
+            // AQUI entra a "consciência" dos tamanhos de pizza
+            if (session.selectedCategoryName && session.selectedCategoryName.toLowerCase().includes("pizza")) {
+                session.step = "SELECT_SIZE";
+                await sendText(from, `🍕 Ótima escolha: *${interactiveTitle}*!`);
+                await sendText(from, "Sobre os tamanhos:\n\n🟢 *Brotinho* (4 pedaços) - Individual\n🟡 *Grande* (8 pedaços) - Padrão para 2-3 pessoas\n🔴 *Gigante* (16 pedaços) - Para família toda!");
+                
+                await sendButtons(from, "Qual tamanho você prefere?", [
+                    { id: "SIZE_BROTO", title: "Brotinho (4)" },
+                    { id: "SIZE_GRANDE", title: "Grande (8)" },
+                    { id: "SIZE_GIGANTE", title: "Gigante (16)" }
+                ]);
+            } else {
+                // Se não for pizza (ex: Bebida), confirma direto
+                session.selectedSize = "Padrão";
+                await confirmOrder(from, session);
+            }
+            continue;
+        }
+
+        if (interactiveId && interactiveId.startsWith("SIZE_")) {
+            session.selectedSize = interactiveTitle; // Ex: "Grande (8)"
+            await confirmOrder(from, session);
+            continue;
+        }
+
+        // --- FINALIZAÇÃO ---
+        if (interactiveId === "FINISH_ORDER") {
+            const totalEstimado = "A calcular"; // Aqui você somaria preços se tivesse puxado do JSON
+            const linkCheckout = `https://wa.me/5519982275105?text=${encodeURIComponent(`Olá, gostaria de finalizar meu pedido:\n- ${session.selectedItemName}\n- Tamanho: ${session.selectedSize}\n- Tipo: ${session.orderType}`)}`;
+            
+            await sendText(from, `🥳 Pedido Enviado para a Cozinha!\n\nUm atendente vai confirmar o valor total e o tempo de entrega.\n\nSe quiser falar direto, clique aqui: ${linkCheckout}`);
+            resetSession(from);
+            continue;
+        }
+
+        // Fallback para texto solto não entendido
+        if (!interactiveId && session.step !== "ASK_ADDRESS") {
+             await sendText(from, "Não entendi sua resposta. Por favor, use os botões ou digite 'menu' para reiniciar.");
+        }
       }
-
-      // ====== seleção de sabor (LIST) ======
-      if (interactiveId && String(interactiveId).startsWith("FLAVOR_")) {
-        const itemId = Number(String(interactiveId).replace("FLAVOR_", ""));
-        session.flavorItemId = Number.isFinite(itemId) ? itemId : null;
-        session.flavorName = interactiveTitle || "Sabor selecionado";
-        session.step = "CONFIRM";
-
-        await showOrderSummary(from, session);
-        continue;
-      }
-
-      // ====== confirmação ======
-      if (normalizeText(text) === "confirmar" && session.step === "CONFIRM") {
-        // Aqui você pode: criar pedido no Cardápio Web (se existir endpoint) ou mandar para humano
-        await sendText(
-          from,
-          "✅ Perfeito! Pedido confirmado.\nJá vamos preparar e te chamar para finalizar o pagamento/entrega."
-        );
-        resetSession(from);
-        await showMainMenu(from);
-        continue;
-      }
-
-      if (normalizeText(text) === "alterar" && session.step === "CONFIRM") {
-        session.step = "ASK_ORDER_TYPE";
-        session.orderType = null;
-        session.addressText = "";
-        session.size = null;
-        session.flavorItemId = null;
-        session.flavorName = null;
-        await sendText(from, "Sem problema 🙂 Vamos refazer rapidinho.");
-        await askOrderType(from);
-        continue;
-      }
-
-      // ====== fallback inteligente ======
-      // se o usuário digitar "cardapio"
-      if (normalized === "cardapio" || normalized === "cardápio") {
-        await sendText(
-          from,
-          `📖 Cardápio online:\nhttps://app.cardapioweb.com/pappi_pizza?s=dony\n\nQuer pedir por aqui? Clique em *Fazer pedido* 😉`
-        );
-        await showMainMenu(from);
-        continue;
-      }
-
-      // se chegou aqui e não entendeu, mostra menu
-      if (!text && !interactiveId) continue;
-
-      // mantém “conversa humana” e guia pra botões
-      await sendText(
-        from,
-        "Entendi 🙂\nPra ficar fácil e rápido, escolhe uma opção aqui embaixo:"
-      );
-      await showMainMenu(from);
     }
-  } catch (err) {
-    console.error("Webhook error:", err?.message, err?.payload || err);
   }
 });
 
-// ===== Run =====
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log("🔥 Pappi Pizza API rodando na porta", PORT));
+// ===== 6. LÓGICA DO CATÁLOGO AUXILIAR =====
 
+async function startCatalogFlow(from) {
+    const catalog = await getCatalog();
+    if (!catalog) {
+        await sendText(from, "Desculpe, sistema de cardápio está instável. Digite o nome da pizza que você quer:");
+        // Aqui poderia ir para um fluxo manual
+        return;
+    }
+
+    // Filtrar categorias principais
+    const categories = catalog.categories || [];
+    const sections = [{
+        title: "Categorias",
+        rows: categories.slice(0, 10).map(c => ({
+            id: `CAT_${c.id}`,
+            title: c.name,
+            description: "Clique para ver sabores"
+        }))
+    }];
+
+    await sendList(from, "O que você gostaria de pedir hoje?", "Ver Cardápio", sections);
+}
+
+async function showItemsFromCategory(from, catId) {
+    const catalog = await getCatalog();
+    const category = catalog.categories.find(c => String(c.id) === String(catId));
+    
+    if (!category) return sendText(from, "Categoria não encontrada.");
+
+    // Salva o nome da categoria na sessão para saber se pergunta tamanho depois
+    const session = getSession(from);
+    session.selectedCategoryName = category.name;
+
+    const items = category.items || [];
+    
+    // Limite do WhatsApp é 10 linhas por seção. Vamos pegar as primeiras 10.
+    // (Numa versão avançada, faríamos paginação)
+    const rows = items.slice(0, 10).map(item => ({
+        id: `ITEM_${item.id}`,
+        title: item.name,
+        description: item.description ? item.description.slice(0, 60) : `R$ ${item.price}`
+    }));
+
+    await sendList(from, `Sabores de ${category.name}`, "Escolher Sabor", [{ title: "Sabores", rows }]);
+}
+
+async function confirmOrder(from, session) {
+    const endereco = session.orderType === "delivery" && session.addressData 
+        ? session.addressData.formatted 
+        : "Retirada no Balcão";
+
+    const resumo = `📝 *Resumo do Pedido*\n\n🍕 Item: *${session.selectedItemName}*\n📏 Tamanho: *${session.selectedSize}*\n🛵 Tipo: *${session.orderType === 'delivery' ? 'Entrega' : 'Retirada'}*\n📍 Local: ${endereco}\n\nConfirma o pedido?`;
+
+    await sendButtons(from, resumo, [
+        { id: "FINISH_ORDER", title: "✅ Confirmar" },
+        { id: "BACK_MENU", title: "❌ Cancelar" }
+    ]);
+}
+
+// ===== 7. ROTAS PÚBLICAS (Health Check) =====
+app.get("/health", (req, res) => {
+  res.json({ 
+      status: "online", 
+      store: "Pappi Pizza", 
+      time: new Date().toISOString(),
+      maps: Boolean(GOOGLE_MAPS_KEY)
+  });
+});
+
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => console.log(`🔥 Pappi API PRO rodando na porta ${PORT}`));

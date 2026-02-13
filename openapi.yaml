@@ -1,5 +1,164 @@
+openapi: 3.1.0
+info:
+  title: Pappi API
+  version: 1.0.0
+  description: >
+    API da Pappi Pizza (WhatsApp + Cardápio Web). Endpoints para consultar loja, catálogo,
+    criar/consultar pedidos, atualizar status e finalizar via WhatsApp.
+servers:
+  - url: https://pappi-api.onrender.com
+    description: Produção (Render)
+
+paths:
+  /store:
+    get:
+      summary: Consultar dados da pizzaria
+      operationId: getStore
+      responses:
+        "200":
+          description: Dados do estabelecimento
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Establishment"
+
+  /catalog:
+    get:
+      summary: Obter cardápio completo
+      operationId: getCatalog
+      responses:
+        "200":
+          description: Catálogo completo
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Catalog"
+
+  /orders:
+    post:
+      summary: Criar novo pedido
+      operationId: createOrder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateOrderRequest"
+      responses:
+        "201":
+          description: Pedido criado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+
+  /orders/{orderId}:
+    get:
+      summary: Consultar pedido
+      operationId: getOrder
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "7637462"
+      responses:
+        "200":
+          description: Pedido encontrado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+        "401":
+          description: Token inválido no Cardápio Web
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Pedido não encontrado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /orders/{orderId}/status:
+    patch:
+      summary: Atualizar status
+      operationId: updateOrderStatus
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "7637462"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateOrderStatusRequest"
+      responses:
+        "200":
+          description: Status atualizado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpdateOrderStatusResponse"
+        "401":
+          description: Token inválido
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "501":
+          description: Status não implementado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /customers:
+    post:
+      summary: Cadastrar cliente
+      operationId: createCustomer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCustomerRequest"
+      responses:
+        "201":
+          description: Cliente cadastrado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Customer"
+
+  /checkout/whatsapp:
+    post:
+      summary: Finalizar via WhatsApp
+      operationId: checkoutWhatsApp
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CheckoutWhatsAppRequest"
+      responses:
+        "200":
+          description: Link para finalizar no WhatsApp
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CheckoutWhatsAppResponse"
+
 components:
   schemas:
+    # ======== SEUS SCHEMAS (Establishment etc.) ========
 
     Establishment:
       type: object
@@ -19,72 +178,55 @@ components:
         id:
           type: integer
           example: 275
-
         name:
           type: string
           example: "Teste Integração"
-
         description:
           type: [string, "null"]
           example: "Sem dúvidas a melhor pizza de toda a região!"
-
         slug:
           type: string
           example: "teste_integracao"
-
         main_color:
           type: string
           pattern: "^#([A-Fa-f0-9]{6})$"
           example: "#890000"
-
         instagram:
           type: [string, "null"]
           example: "cardapio.web"
-
         whatsapp:
           type: [string, "null"]
           pattern: "^[0-9]{10,15}$"
           example: "5541996869828"
-
         logo_image:
           $ref: "#/components/schemas/Image"
-
         banner_image:
           $ref: "#/components/schemas/Image"
-
         status:
           type: string
           enum: [ACTIVE, INACTIVE]
           example: ACTIVE
-
         operation_modes:
           $ref: "#/components/schemas/OperationModes"
-
         custom_domain:
           type: [string, "null"]
           example: null
-
         created_at:
           type: string
           format: date-time
           example: "2023-06-23T11:27:53.582-03:00"
-
         updated_at:
           type: string
           format: date-time
           example: "2023-06-27T11:24:39.404-03:00"
-
         address:
           $ref: "#/components/schemas/AddressNullable"
-
         opening_hours:
           $ref: "#/components/schemas/OpeningHours"
-
         payment_methods:
           type: array
           items:
             $ref: "#/components/schemas/EstablishmentPaymentMethod"
-
         schedule_setting:
           $ref: "#/components/schemas/ScheduleSetting"
 
@@ -157,7 +299,6 @@ components:
           type: [string, "null"]
           example: "-38.4836987"
 
-    # opening_hours tem: dias + custom_dates (objeto por data) + temporary_state + timezone
     OpeningHours:
       type: object
       required:
@@ -173,21 +314,13 @@ components:
         - temporary_state_end_at
         - timezone
       properties:
-        sunday:
-          $ref: "#/components/schemas/TimeRanges"
-        monday:
-          $ref: "#/components/schemas/TimeRanges"
-        tuesday:
-          $ref: "#/components/schemas/TimeRanges"
-        wednesday:
-          $ref: "#/components/schemas/TimeRanges"
-        thursday:
-          $ref: "#/components/schemas/TimeRanges"
-        friday:
-          $ref: "#/components/schemas/TimeRanges"
-        saturday:
-          $ref: "#/components/schemas/TimeRanges"
-
+        sunday: { $ref: "#/components/schemas/TimeRanges" }
+        monday: { $ref: "#/components/schemas/TimeRanges" }
+        tuesday: { $ref: "#/components/schemas/TimeRanges" }
+        wednesday: { $ref: "#/components/schemas/TimeRanges" }
+        thursday: { $ref: "#/components/schemas/TimeRanges" }
+        friday: { $ref: "#/components/schemas/TimeRanges" }
+        saturday: { $ref: "#/components/schemas/TimeRanges" }
         custom_dates:
           type: object
           additionalProperties:
@@ -196,17 +329,14 @@ components:
             "2023-07-15":
               intervals: []
               observation: "Férias coletivas!"
-
         temporary_state:
           type: [string, "null"]
           enum: [open, closed, "null"]
           example: "closed"
-
         temporary_state_end_at:
           type: [string, "null"]
           format: date-time
           example: "2023-06-27T11:55:35.000-03:00"
-
         timezone:
           type: string
           example: "America/Sao_Paulo"
@@ -266,28 +396,20 @@ components:
             - food99
             - food99_voucher
           example: pix
-
         percentual_fee:
           type: [number, "null"]
-          description: "Taxa percentual adicional (se preenchida, fixed_fee costuma ser null)."
           example: null
-
         fixed_fee:
           type: [number, "null"]
-          description: "Taxa fixa adicional (se preenchida, percentual_fee costuma ser null)."
           example: null
-
         observation:
-          description: "Pode ser null, string, ou objeto (no caso de pix)."
           oneOf:
             - type: "null"
             - type: string
             - $ref: "#/components/schemas/PixEstablishmentObservation"
-
         active:
           type: boolean
           example: true
-
         available_on_menu:
           type: boolean
           example: true
@@ -323,28 +445,21 @@ components:
         hours_in_advance_for_scheduling:
           type: number
           example: 1
-
         maximum_days_for_scheduling:
           type: integer
           example: 15
-
         time_interval:
           type: integer
-          description: "Intervalo em minutos"
           example: 30
-
         order_schedule_only_for_next_available_day:
           type: boolean
           example: false
-
         block_schedule_for_the_same_day:
           type: boolean
           example: false
-
         quantity_of_orders_per_interval:
           type: [integer, "null"]
           example: null
-
         available_hours:
           $ref: "#/components/schemas/AvailableHours"
 
@@ -363,38 +478,201 @@ components:
         - temporary_state_end_at
         - timezone
       properties:
-        sunday:
-          $ref: "#/components/schemas/TimeRanges"
-        monday:
-          $ref: "#/components/schemas/TimeRanges"
-        tuesday:
-          $ref: "#/components/schemas/TimeRanges"
-        wednesday:
-          $ref: "#/components/schemas/TimeRanges"
-        thursday:
-          $ref: "#/components/schemas/TimeRanges"
-        friday:
-          $ref: "#/components/schemas/TimeRanges"
-        saturday:
-          $ref: "#/components/schemas/TimeRanges"
-
+        sunday: { $ref: "#/components/schemas/TimeRanges" }
+        monday: { $ref: "#/components/schemas/TimeRanges" }
+        tuesday: { $ref: "#/components/schemas/TimeRanges" }
+        wednesday: { $ref: "#/components/schemas/TimeRanges" }
+        thursday: { $ref: "#/components/schemas/TimeRanges" }
+        friday: { $ref: "#/components/schemas/TimeRanges" }
+        saturday: { $ref: "#/components/schemas/TimeRanges" }
         custom_dates:
           type: [object, "null"]
-          description: "Aqui veio null no exemplo"
           additionalProperties:
             $ref: "#/components/schemas/CustomDateConfig"
           example: null
-
         temporary_state:
           type: [string, "null"]
           enum: [open, closed, "null"]
           example: null
-
         temporary_state_end_at:
           type: [string, "null"]
           format: date-time
           example: null
-
         timezone:
           type: string
           example: "America/Sao_Paulo"
+
+    # ======== SCHEMAS NOVOS (Orders, Catalog, Customer, etc.) ========
+
+    Catalog:
+      type: object
+      required: [categories]
+      properties:
+        categories:
+          type: array
+          items:
+            $ref: "#/components/schemas/CatalogCategory"
+
+    CatalogCategory:
+      type: object
+      required: [id, name, items]
+      properties:
+        id:
+          type: [string, integer]
+          example: "cat_pizzas"
+        name:
+          type: string
+          example: "🍕 Pizzas Salgadas"
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/CatalogItem"
+
+    CatalogItem:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: [string, integer]
+          example: "2991"
+        name:
+          type: string
+          example: "Calabresa"
+        description:
+          type: [string, "null"]
+          example: "Clássica com cebola e azeitonas"
+        price:
+          type: [number, "null"]
+          example: 30.0
+
+    Customer:
+      type: object
+      required: [id, name, phone]
+      properties:
+        id:
+          type: string
+          example: "1700000000000"
+        name:
+          type: string
+          example: "Dony Momesso"
+        phone:
+          type: string
+          example: "5519999999999"
+
+    CreateCustomerRequest:
+      type: object
+      required: [name, phone]
+      properties:
+        name:
+          type: string
+        phone:
+          type: string
+
+    Order:
+      type: object
+      properties:
+        id:
+          type: [string, integer]
+          example: 7637462
+        display_id:
+          type: [integer, "null"]
+          example: 48
+        merchant_id:
+          type: [integer, "null"]
+          example: 1
+        status:
+          type: string
+          example: "confirmed"
+        order_type:
+          type: string
+          example: "takeout"
+        order_timing:
+          type: string
+          example: "immediate"
+        total:
+          type: [number, "null"]
+          example: 103.8
+        created_at:
+          type: [string, "null"]
+          format: date-time
+        updated_at:
+          type: [string, "null"]
+          format: date-time
+        customer:
+          type: [object, "null"]
+          properties:
+            id: { type: integer, example: 1574794 }
+            phone: { type: string, example: "5511999999999" }
+            name: { type: string, example: "Matheus Lessa" }
+
+    CreateOrderRequest:
+      type: object
+      description: "Payload livre (por enquanto) para criação de pedido na Pappi API."
+      properties:
+        customer:
+          type: object
+          properties:
+            name: { type: string }
+            phone: { type: string }
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              item_id: { type: string }
+              quantity: { type: number }
+
+    UpdateOrderStatusRequest:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          example: "ready"
+
+    UpdateOrderStatusResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: true
+        orderId:
+          type: string
+          example: "7637462"
+        status:
+          type: string
+          example: "ready"
+
+    CheckoutWhatsAppRequest:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+          example: "Novo Pedido: Calabresa Grande"
+
+    CheckoutWhatsAppResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: true
+        url:
+          type: string
+          example: "https://wa.me/5519982275105?text=Novo%20Pedido%3A%20Calabresa"
+        text:
+          type: string
+          example: "Novo Pedido: Calabresa Grande"
+
+    ErrorResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: false
+        message:
+          type: string
+          example: "Token inválido."
+        payload:
+          type: [object, "null"]
+

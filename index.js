@@ -333,6 +333,90 @@ async function showOrderSummary(to, session) {
 
   await sendText(to, resumo);
 }
+// ===== Webhook Cardápio Web (sem polling) =====
+const CARDAPIOWEB_WEBHOOK_TOKEN = process.env.CARDAPIOWEB_WEBHOOK_TOKEN || "";
+
+// Recomendado: cache telefone por pedido (se pedido veio do WhatsApp)
+const orderPhoneCache = new Map(); // orderId -> phone (digits only)
+
+// Função auxiliar: tenta descobrir telefone do cliente do pedido
+function getPhoneFromOrder(order) {
+  const phone = order?.customer?.phone;
+  return phone ? digitsOnly(phone) : null;
+}
+
+// Rota que o Cardápio Web vai chamar (configure no Portal)
+app.post("/cardapioweb/webhook", async (req, res) => {
+  // 1) Responder rápido 200 (até 5s) — e processar em seguida
+  res.status(200).json({ ok: true });
+
+  try {
+    // 2) valida token opcional
+    if (CARDAPIOWEB_WEBHOOK_TOKEN) {
+      const token = req.header("X-Webhook-Token") || "";
+      if (token !== CARDAPIOWEB_WEBHOOK_TOKEN) {
+        console.warn("Webhook Cardápio Web: token inválido");
+        return;
+      }
+    }
+
+    // 3) payload do webhook (pode variar; vamos ser flexíveis)
+    const body = req.body || {};
+    const event = body.event || body.type || body.action || "unknown";
+    const resource = body.resource || body.entity || "unknown";
+
+    // tenta achar order_id em campos comuns
+    const orderId =
+      body?.order_id ||
+      body?.resource_id ||
+      body?.data?.order_id ||
+      body?.data?.id ||
+      body?.order?.id ||
+      body?.id ||
+      null;
+
+    if (!orderId) {
+      console.log("Webhook Cardápio Web recebido, mas sem orderId:", { event, resource });
+      return;
+    }
+
+    // 4) busca o pedido completo no Cardápio Web
+    let order = null;
+    try {
+      order = await getOrderById(orderId); // usa a função que você já colocou
+    } catch (e) {
+      console.error("Falha ao buscar pedido no Cardápio Web:", e?.message, e?.payload || "");
+      return;
+    }
+
+    // 5) determina telefone para avisar
+    let toPhone = getPhoneFromOrder(order);
+
+    // fallback: se pedido não tem customer, tenta cache (quando veio do WhatsApp)
+    if (!toPhone && orderPhoneCache.has(String(orderId))) {
+      toPhone = orderPhoneCache.get(String(orderId));
+    }
+
+    if (!toPhone) {
+      console.log("Pedido sem telefone de cliente. orderId:", orderId);
+      return;
+    }
+
+    // 6) manda mensagem baseada no status atual
+    const msg = formatOrderStatus(order); // usa sua função de status
+    await sendText(toPhone, msg);
+
+    // 7) acalma se estiver em preparo
+    if (order?.status === "confirmed") {
+      await sendText(
+        toPhone,
+        "🙏 Já está em preparo. Assim que mudar no sistema, eu te aviso por aqui."
+      );
+    }
+  } catch (err) {
+    console.error("cardapioweb webhook error:", err?.message, err?.payload || err);
+  }
+});
 
 // ===== WEBHOOK META =====
 app.get("/webhook", (req, res) => {
@@ -366,7 +450,22 @@ app.post("/webhook", async (req, res) => {
 
       // ====== comandos universais ======
       const normalized = normalizeText(text);
+      // ====== consulta automática de status ======
+const wantsStatus =
+  normalized.includes("status") ||
+  normalized.includes("meu pedido") ||
+  normalized.includes("cade") ||
+  normalized.includes("cadê") ||
+  normalized.includes("atras") ||
+  normalized.includes("demor");
 
+if (wantsStatus) {
+  await sendText(
+    from,
+    "🔎 Estou consultando o status do seu pedido no sistema...\n\nSe estiver com atraso, já te atualizo aqui 🙏"
+  );
+  continue;
+}
       // reset
       if (normalized === "menu" || normalized === "inicio" || interactiveId === "BACK_MENU") {
         resetSession(from);

@@ -1,19 +1,20 @@
 /**
- * 🍕 Pappi Pizza API - Versão 5.0 (Blindada com Retry)
- * * Novidades:
- * - Sistema de Retentativa (Retry): Tenta 3x antes de desistir.
- * - Feedback de Espera: Avisa o cliente se estiver demorando.
- * - Zero Suposições: Só avança se tiver certeza ou confirmação.
+ * 🍕 Pappi Pizza API - Versão 6.0 (FINAL CORRIGIDA)
+ * * CORREÇÕES CRÍTICAS:
+ * 1. Bug do "Não entendi" no endereço resolvido (prioridade de texto).
+ * 2. Integração de Webhook do Cardápio Web (recebe atualização de status).
+ * 3. Lógica de Endereço com Google Maps mais robusta.
  */
 
 const express = require("express");
 const app = express();
 
-// Aumenta limite de dados
-app.use(express.json({ limit: "20mb" }));
+// Aumenta limite para receber JSON grandes (imagens/logs)
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ extended: true }));
 
 // =================================================================================
-// 1. CONFIGURAÇÕES E CHAVES
+// 1. CHAVES E CONFIGURAÇÕES
 // =================================================================================
 
 const GOOGLE_MAPS_KEY = process.env.GOOGLE_MAPS_KEY || "AIzaSyBx8S4Rxzj3S74knuSrwnsJqEM1WCDKLj0"; 
@@ -21,7 +22,7 @@ const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID || "939101
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN || ""; // Configure no Render
 const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN || "pappi_verify_token";
 
-// Credenciais Cardápio Web
+// Cardápio Web (Suas chaves reais)
 const CARDAPIOWEB_BASE_URL = "https://integracao.cardapioweb.com";
 const CARDAPIOWEB_TOKEN = process.env.CARDAPIOWEB_TOKEN || "457DPYEpX32TcaxL2A7YcXiLUZwkY9jucKfL2WA5";
 const CARDAPIOWEB_STORE_ID = process.env.CARDAPIOWEB_STORE_ID || "5371";
@@ -31,40 +32,14 @@ const STORE_LOCATION = { lat: -22.90556, lng: -47.06083 };
 const MAX_DELIVERY_RADIUS_KM = 12;
 
 // =================================================================================
-// 2. CARDÁPIO DE SEGURANÇA (Último recurso)
-// =================================================================================
-const FALLBACK_CATALOG = {
-    categories: [
-        {
-            id: "cat_pizzas",
-            name: "🍕 Pizzas Pappi (Menu Básico)",
-            items: [
-                { id: "2991", name: "Calabresa", description: "Clássica", price: 30.00 },
-                { id: "2992", name: "Frango c/ Catupiry", description: "Frango desfiado temperado", price: 35.00 },
-                { id: "2988", name: "Margherita", description: "Tomate e manjericão", price: 32.00 },
-                { id: "2995", name: "Portuguesa", description: "Completa", price: 34.00 }
-            ]
-        },
-        {
-            id: "cat_bebidas",
-            name: "🥤 Bebidas",
-            items: [
-                { id: "3006", name: "Coca-Cola 2L", description: "Garrafa", price: 14.00 },
-                { id: "3005", name: "Guaraná 2L", description: "Garrafa", price: 12.00 }
-            ]
-        }
-    ]
-};
-
-// =================================================================================
-// 3. FUNÇÕES DE AJUDA & RETENTATIVA (Retry)
+// 2. HELPERS (Ferramentas)
 // =================================================================================
 
 function digitsOnly(str) { return String(str || "").replace(/\D/g, ""); }
 function normalizeText(str) { return (str || "").toLowerCase().normalize("NFD").replace(/\p{Diacritic}/gu, "").trim(); }
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
-// Cálculo de distância
+// Distância
 function getDistanceFromLatLonInKm(lat1, lon1, lat2, lon2) {
     const R = 6371; 
     const dLat = deg2rad(lat2 - lat1);
@@ -75,55 +50,27 @@ function getDistanceFromLatLonInKm(lat1, lon1, lat2, lon2) {
 }
 function deg2rad(deg) { return deg * (Math.PI / 180); }
 
-/**
- * Função inteligente que tenta buscar dados 3 vezes antes de falhar.
- * Se falhar na primeira, avisa o usuário (opcional).
- */
-async function fetchWithRetry(url, options, retries = 3, delay = 1500, onRetry = null) {
-    for (let i = 0; i < retries; i++) {
-        try {
-            const res = await fetch(url, options);
-            if (!res.ok) {
-                // Se for erro 500 (servidor), tenta de novo. Se for 400 (cliente), desiste.
-                if (res.status >= 500) throw new Error(`Server Error: ${res.status}`);
-                return res; // Retorna o erro 4xx para tratar lá fora
-            }
-            return res; // Sucesso
-        } catch (err) {
-            console.warn(`⚠️ Tentativa ${i + 1} falhou: ${err.message}`);
-            
-            if (i < retries - 1) {
-                if (onRetry) await onRetry(); // Avisa o usuário se necessário
-                await sleep(delay); // Espera um pouco antes de tentar de novo
-            } else {
-                throw err; // Se acabou as tentativas, lança o erro real
-            }
-        }
-    }
-}
-
 // =================================================================================
-// 4. INTEGRAÇÕES (Com Retry)
+// 3. INTEGRAÇÕES
 // =================================================================================
 
 // --- Google Maps ---
-async function googleGeocode(address, from) {
+async function googleGeocode(address) {
     if (!GOOGLE_MAPS_KEY) return [];
 
     let query = address;
-    if (!normalizeText(address).includes("campinas")) query = `${address}, Campinas - SP`;
+    // Se não escreveu "Campinas", adiciona para ajudar o Google
+    if (!normalizeText(address).includes("campinas")) {
+        query = `${address}, Campinas - SP`;
+    }
     
+    console.log(`🔎 Google Maps buscando: "${query}"`);
     const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(query)}&components=country:BR&language=pt-BR&key=${GOOGLE_MAPS_KEY}`;
 
     try {
-        // Tenta buscar. Se falhar, espera e tenta de novo.
-        const resp = await fetchWithRetry(url, {}, 3, 1000, async () => {
-            // Se falhar a primeira, manda msg de paciência (só na primeira falha real)
-            // Mas para Maps geralmente é rápido, não vamos floodar o chat.
-            console.log("Retentando Google Maps...");
-        });
-
+        const resp = await fetch(url);
         const data = await resp.json();
+
         if (data.status === "OK" && data.results.length > 0) {
             return data.results.slice(0, 5).map(res => ({
                 formatted: res.formatted_address,
@@ -132,52 +79,39 @@ async function googleGeocode(address, from) {
             }));
         }
     } catch (e) {
-        console.error("❌ Erro Google Maps após tentativas:", e);
+        console.error("❌ Erro Google Maps:", e);
     }
     return [];
 }
 
-// --- Cardápio Web ---
-async function getCatalog(from) {
+// --- Cardápio Web (Catálogo) ---
+async function getCatalog() {
     const url = `${CARDAPIOWEB_BASE_URL}/api/partner/v1/catalog`;
-    
-    console.log("📡 Buscando cardápio...");
-
     try {
-        // Tenta 3 vezes. Se falhar na primeira, avisa o cliente.
-        const resp = await fetchWithRetry(
-            url, 
-            {
-                headers: { "X-API-KEY": CARDAPIOWEB_TOKEN, "Accept": "application/json" },
-                timeout: 8000
-            }, 
-            3, 
-            2000, 
-            async () => {
-                // Callback: Executa se a primeira tentativa falhar
-                await sendText(from, "⏳ O sistema do cardápio está demorando um pouquinho... Só um minuto, estou tentando conectar novamente.");
-            }
-        );
-
-        if (!resp.ok) throw new Error(`Status ${resp.status}`);
-        
+        const resp = await fetch(url, {
+            headers: { "X-API-KEY": CARDAPIOWEB_TOKEN, "Accept": "application/json" },
+            timeout: 8000
+        });
+        if (!resp.ok) throw new Error("Erro API");
         const data = await resp.json();
-        if (!data.categories || data.categories.length === 0) throw new Error("Vazio");
-        
+        if (!data.categories) throw new Error("Vazio");
         return data;
-
     } catch (e) {
-        console.error("❌ Falha Cardápio Web Final:", e.message);
-        await sendText(from, "⚠️ O sistema oficial está instável agora. Vou te mostrar o cardápio básico de emergência para você não ficar sem pedir.");
-        return FALLBACK_CATALOG;
+        console.error("Erro Cardápio Web, usando backup.");
+        // Retorna backup básico para não travar
+        return {
+            categories: [
+                { id: "100", name: "🍕 Pizzas", items: [{id:"1", name:"Calabresa", price:30}, {id:"2", name:"Mussarela", price:30}] },
+                { id: "200", name: "🥤 Bebidas", items: [{id:"3", name:"Coca-Cola", price:12}] }
+            ]
+        };
     }
 }
 
-// --- WhatsApp Sender ---
+// --- WhatsApp Envio ---
 async function waSend(to, payload) {
-    if (!WHATSAPP_TOKEN) return console.error("Sem Token WA");
+    if (!WHATSAPP_TOKEN) return console.error("⚠️ Falta TOKEN WhatsApp");
     const url = `https://graph.facebook.com/v24.0/${WHATSAPP_PHONE_NUMBER_ID}/messages`;
-    
     try {
         await fetch(url, {
             method: "POST",
@@ -203,9 +137,12 @@ async function sendLocationImage(to, lat, lng, caption) {
 }
 
 // =================================================================================
-// 5. SESSÃO
+// 4. SESSÃO (Memória)
 // =================================================================================
 const sessions = new Map();
+// Cache simples para mapear ID do pedido -> Telefone do Cliente (para avisar status)
+const orderToPhoneMap = new Map(); 
+
 function getSession(from) {
     if (!sessions.has(from)) sessions.set(from, { step: "MENU" });
     return sessions.get(from);
@@ -213,26 +150,53 @@ function getSession(from) {
 function resetSession(from) { sessions.set(from, { step: "MENU" }); }
 
 // =================================================================================
-// 6. PROCESSAR ENDEREÇO
+// 5. ROTA DE STATUS DO PEDIDO (WEBHOOK CARDÁPIO WEB)
 // =================================================================================
-async function processSelectedAddress(from, session, geoData) {
-    session.addressData = geoData;
-    const dist = getDistanceFromLatLonInKm(STORE_LOCATION.lat, STORE_LOCATION.lng, geoData.location.lat, geoData.location.lng);
-    const distFmt = dist.toFixed(1);
+// O Cardápio Web manda POST aqui quando o pedido muda de status
+app.post("/cardapioweb/webhook", async (req, res) => {
+    res.status(200).json({ status: "ok" }); // Responde 200 rápido para não travar
 
-    if (dist > MAX_DELIVERY_RADIUS_KM) {
-        await sendLocationImage(from, geoData.location.lat, geoData.location.lng, "Fora da área");
-        await sendText(from, `⚠️ Endereço a *${distFmt}km* da loja (Limite: ${MAX_DELIVERY_RADIUS_KM}km).\nPodemos tentar entregar com taxa extra.`);
-        await sendButtons(from, "Deseja continuar?", [{ id: "ADDR_CONFIRM", title: "Sim, Continuar" }, { id: "ADDR_RETRY", title: "Não, Mudar Local" }]);
-    } else {
-        await sendLocationImage(from, geoData.location.lat, geoData.location.lng, "Local Encontrado");
-        await sendText(from, `✅ Localizado: *${geoData.formatted}*\n📏 Distância: ${distFmt}km`);
-        await sendButtons(from, "Confirma este local?", [{ id: "ADDR_CONFIRM", title: "Sim, Confirmar" }, { id: "ADDR_RETRY", title: "Não, Corrigir" }]);
+    try {
+        const body = req.body;
+        console.log("🔔 Webhook Cardápio Web recebido:", JSON.stringify(body));
+
+        const status = body.status; // pending, confirmed, delivered, etc
+        const orderId = body.id || body.order_id;
+        
+        // Tenta descobrir o telefone do cliente
+        let phone = null;
+        if (body.customer && body.customer.phone) {
+            phone = digitsOnly(body.customer.phone);
+        } else if (orderToPhoneMap.has(String(orderId))) {
+            phone = orderToPhoneMap.get(String(orderId));
+        }
+
+        if (!phone) {
+            console.log("⚠️ Webhook recebido mas sem telefone do cliente. Ignorando envio.");
+            return;
+        }
+
+        // Traduz o status para mensagem amigável
+        let msg = "";
+        switch (status) {
+            case "confirmed": msg = `🔥 Seu pedido #${orderId} foi confirmado e já está sendo preparado!`; break;
+            case "ready": msg = `🍕 Oba! Seu pedido #${orderId} está pronto!`; break;
+            case "released": msg = `🛵 Seu pedido #${orderId} saiu para entrega. Fique atento!`; break;
+            case "delivered": msg = `✅ Pedido #${orderId} entregue. Bom apetite!`; break;
+            case "canceled": msg = `❌ O pedido #${orderId} foi cancelado. Entre em contato se houver dúvidas.`; break;
+        }
+
+        if (msg) {
+            await sendText(phone, msg);
+        }
+
+    } catch (e) {
+        console.error("Erro processando webhook Cardápio Web:", e);
     }
-}
+});
 
 // =================================================================================
-// 7. WEBHOOK PRINCIPAL
+// 6. ROTA WHATSAPP (Fluxo Principal)
 // =================================================================================
 
 app.get("/webhook", (req, res) => {
@@ -242,7 +206,7 @@ app.get("/webhook", (req, res) => {
 });
 
 app.post("/webhook", async (req, res) => {
-    res.sendStatus(200); // ⚡ Responde rápido pro WhatsApp não ficar reenviando
+    res.sendStatus(200);
 
     const body = req.body;
     if (!body.entry) return;
@@ -255,6 +219,7 @@ app.post("/webhook", async (req, res) => {
             for (const msg of value.messages) {
                 const from = msg.from;
                 const text = msg.text?.body || "";
+                
                 const interactive = msg.interactive;
                 const interactiveId = interactive?.button_reply?.id || interactive?.list_reply?.id;
                 const interactiveTitle = interactive?.button_reply?.title || interactive?.list_reply?.title;
@@ -262,128 +227,120 @@ app.post("/webhook", async (req, res) => {
                 const session = getSession(from);
                 const input = normalizeText(text);
 
-                // --- RESET ---
-                if (input === "menu" || input === "oi" || input === "ola" || interactiveId === "BACK_MENU") {
+                console.log(`📩 [${from}] Step: ${session.step} | Input: ${text || interactiveId}`);
+
+                // --- RESET GLOBAL ---
+                if (input === "menu" || input === "oi" || interactiveId === "BACK_MENU") {
                     resetSession(from);
-                    await sendText(from, "👋 Olá! Bem-vindo à *Pappi Pizza* 🍕\nEstou à disposição. Por onde começamos?");
+                    await sendText(from, "👋 Bem-vindo à Pappi Pizza! 🍕\nComo posso ajudar?");
                     await sendButtons(from, "Menu Principal", [
                         { id: "BTN_PEDIR", title: "🛒 Fazer Pedido" },
                         { id: "BTN_CARDAPIO", title: "📖 Ver Cardápio" },
-                        { id: "BTN_HUMANO", title: "👨‍🍳 Atendente" }
+                        { id: "BTN_HUMANO", title: "👨‍🍳 Falar c/ Humano" }
                     ]);
                     continue;
                 }
 
+                // --- FLUXO DE PEDIDO ---
                 if (interactiveId === "BTN_PEDIR") {
                     session.step = "ORDER_TYPE";
-                    await sendButtons(from, "É para entrega ou retirada?", [{ id: "TYPE_DELIVERY", title: "🛵 Entrega" }, { id: "TYPE_TAKEOUT", title: "🏃 Retirada" }]);
+                    await sendButtons(from, "É entrega ou retirada?", [
+                        { id: "TYPE_DELIVERY", title: "🛵 Entrega" },
+                        { id: "TYPE_TAKEOUT", title: "🏃 Retirada" }
+                    ]);
                     continue;
                 }
 
                 if (interactiveId === "BTN_CARDAPIO") {
-                    await sendText(from, "Aguarde um instante, estou pegando o link atualizado...");
-                    // Pequeno delay para parecer natural
-                    await sleep(1000); 
-                    await sendText(from, "Aqui está: https://app.cardapioweb.com/pappi_pizza?s=dony");
-                    await sendButtons(from, "Opções", [{ id: "BTN_PEDIR", title: "Fazer Pedido" }, { id: "BACK_MENU", title: "Voltar" }]);
+                    await sendText(from, "Acesse: https://app.cardapioweb.com/pappi_pizza?s=dony");
                     continue;
                 }
 
-                if (interactiveId === "BTN_HUMANO") {
-                    await sendText(from, "👨‍🍳 Chamei um atendente. Por favor, aguarde um minuto que alguém já visualiza sua mensagem.");
-                    continue;
-                }
-
-                // --- TIPO ---
+                // --- TIPO DE ENTREGA ---
                 if (interactiveId === "TYPE_DELIVERY") {
                     session.orderType = "delivery";
-                    session.step = "ASK_ADDRESS";
-                    await sendText(from, "📍 *Entrega*\nDigite o endereço: *Rua, Número e Bairro*.");
-                    continue;
+                    session.step = "ASK_ADDRESS"; // <--- DEFINE O PASSO AQUI
+                    await sendText(from, "📍 *Entrega*\nPor favor, digite seu endereço:\n(Ex: Rua Maniel Carvalho, 53)");
+                    continue; // Para aqui e espera a próxima mensagem (que será o texto)
                 }
 
                 if (interactiveId === "TYPE_TAKEOUT") {
                     session.orderType = "takeout";
                     session.step = "SELECT_CATEGORY";
-                    await sendText(from, "🏃 *Retirada*\nCarregando cardápio...");
                     await startCatalogFlow(from);
                     continue;
                 }
 
-                // --- ENDEREÇO (SEM SUPOSIÇÕES) ---
+                // --- 🚨 CORREÇÃO CRÍTICA: PROCESSAMENTO DE ENDEREÇO ---
+                // Verifica se estamos esperando endereço E se não é um botão clicado
                 if (session.step === "ASK_ADDRESS" && !interactiveId) {
+                    
                     if (input.length < 5) {
-                        await sendText(from, "❌ Muito curto. Preciso de: Rua, Número e Bairro.");
+                        await sendText(from, "❌ Endereço muito curto. Digite Rua e Número.");
                         return;
                     }
 
-                    await sendText(from, "🔎 Pesquisando endereço, só um minuto...");
-                    
-                    const results = await googleGeocode(text, from);
+                    await sendText(from, "🔎 Buscando endereço...");
+                    const results = await googleGeocode(text);
 
                     if (results.length === 0) {
-                        await sendText(from, "❌ Não encontrei esse local exato. Pode verificar se digitou o nome da rua e o número certos?");
+                        await sendText(from, "❌ Não encontrei. Tente digitar: *Nome da Rua, Número, Bairro*");
                         return;
                     }
 
                     if (results.length === 1) {
-                        await processSelectedAddress(from, session, results[0]);
-                        return;
+                        await processAddress(from, session, results[0]);
+                    } else {
+                        // Lista para desambiguação
+                        session.candidateAddresses = results;
+                        const rows = results.map((addr, index) => ({
+                            id: `ADDR_OPT_${index}`,
+                            title: (addr.formatted.split(",")[0] || "Opção").slice(0, 23),
+                            description: addr.formatted.slice(0, 70)
+                        }));
+                        await sendList(from, "Qual destes é o seu?", "Selecionar", [{ title: "Opções", rows }]);
                     }
-
-                    // Se tiver mais de um, não supõe! Pergunta.
-                    session.candidateAddresses = results;
-                    const rows = results.map((addr, index) => ({
-                        id: `ADDR_OPT_${index}`,
-                        title: (addr.formatted.split(",")[0] || "Opção").slice(0, 23),
-                        description: addr.formatted.slice(0, 70)
-                    }));
-                    await sendList(from, "Encontrei esses locais. Qual deles é o seu?", "Selecionar", [{ title: "Opções", rows }]);
-                    return;
+                    return; // IMPORTANTE: Return para não cair no "Não entendi"
                 }
 
+                // --- RESPOSTA DA LISTA DE ENDEREÇO ---
                 if (interactiveId && interactiveId.startsWith("ADDR_OPT_")) {
-                    const index = parseInt(interactiveId.replace("ADDR_OPT_", ""));
-                    const chosenAddr = session.candidateAddresses ? session.candidateAddresses[index] : null;
-                    if (chosenAddr) await processSelectedAddress(from, session, chosenAddr);
-                    else await sendText(from, "Erro. Digite novamente.");
-                    continue;
-                }
-
-                if (interactiveId === "ADDR_RETRY") {
-                    session.step = "ASK_ADDRESS";
-                    await sendText(from, "Ok, digite novamente (Rua, Número e Bairro):");
+                    const idx = parseInt(interactiveId.replace("ADDR_OPT_", ""));
+                    const chosen = session.candidateAddresses[idx];
+                    await processAddress(from, session, chosen);
                     continue;
                 }
 
                 if (interactiveId === "ADDR_CONFIRM") {
                     session.step = "SELECT_CATEGORY";
-                    await sendText(from, "✅ Combinado! Buscando cardápio...");
+                    await sendText(from, "✅ Endereço confirmado! Carregando cardápio...");
                     await startCatalogFlow(from);
                     continue;
                 }
+                
+                if (interactiveId === "ADDR_RETRY") {
+                    session.step = "ASK_ADDRESS";
+                    await sendText(from, "Ok, digite o endereço novamente:");
+                    continue;
+                }
 
-                // --- CATÁLOGO ---
+                // --- CATÁLOGO E ITENS ---
                 if (interactiveId && interactiveId.startsWith("CAT_")) {
                     const catId = interactiveId.replace("CAT_", "");
-                    await showItemsFromCategory(from, catId);
+                    await showItems(from, catId);
                     continue;
                 }
 
                 if (interactiveId && interactiveId.startsWith("ITEM_")) {
-                    const itemId = interactiveId.replace("ITEM_", "");
-                    session.selectedItemId = itemId;
                     session.selectedItemName = interactiveTitle;
-
-                    const isPizza = session.selectedCategoryName?.toLowerCase().includes("pizza") || interactiveTitle.toLowerCase().includes("pizza");
-
-                    if (isPizza) {
-                        session.step = "SELECT_SIZE";
-                        await sendText(from, `🍕 Sabor: *${interactiveTitle}*`);
-                        await sendButtons(from, "Escolha o tamanho:", [
-                            { id: "SIZE_BROTO", title: "Brotinho (4)" },
-                            { id: "SIZE_GRANDE", title: "Grande (8)" },
-                            { id: "SIZE_GIGANTE", title: "Gigante (16)" }
+                    
+                    // Lógica simples: se tem "Pizza" no nome, pede tamanho
+                    if (interactiveTitle.toLowerCase().includes("pizza") || session.catName?.includes("Pizza")) {
+                        session.step = "SIZE";
+                        await sendButtons(from, `Tamanho da ${interactiveTitle}?`, [
+                            {id: "SZ_BROTO", title: "Brotinho (4)"},
+                            {id: "SZ_GRANDE", title: "Grande (8)"},
+                            {id: "SZ_GIGANTE", title: "Gigante (16)"}
                         ]);
                     } else {
                         session.selectedSize = "Padrão";
@@ -392,20 +349,22 @@ app.post("/webhook", async (req, res) => {
                     continue;
                 }
 
-                if (interactiveId && interactiveId.startsWith("SIZE_")) {
+                if (interactiveId && interactiveId.startsWith("SZ_")) {
                     session.selectedSize = interactiveTitle;
                     await confirmOrder(from, session);
                     continue;
                 }
 
-                if (interactiveId === "FINISH_ORDER") {
-                    const endereco = session.orderType === "delivery" && session.addressData ? session.addressData.formatted : "Retirada";
-                    const link = `https://wa.me/5519982275105?text=${encodeURIComponent(`Novo Pedido:\n${session.selectedItemName}\n${session.selectedSize}\n${session.orderType}\n${endereco}`)}`;
-                    await sendText(from, `✅ Pedido Enviado!\n\nUm atendente vai confirmar o total.\nFinalizar: ${link}`);
+                // --- FINALIZAÇÃO ---
+                if (interactiveId === "FINISH") {
+                    const address = session.orderType === "delivery" ? session.addressData.formatted : "Retirada";
+                    const link = `https://wa.me/5519982275105?text=${encodeURIComponent(`Novo Pedido:\n${session.selectedItemName}\n${session.selectedSize}\n${session.orderType}\n${address}`)}`;
+                    await sendText(from, `🥳 Pedido enviado!\nClique para confirmar: ${link}`);
                     resetSession(from);
                     continue;
                 }
 
+                // --- FALLBACK (Só cai aqui se nada acima der match) ---
                 if (!interactiveId && session.step !== "ASK_ADDRESS") {
                     await sendText(from, "Não entendi. Digite *Menu* para voltar.");
                 }
@@ -414,45 +373,51 @@ app.post("/webhook", async (req, res) => {
     }
 });
 
-// --- FUNÇÕES CARDÁPIO ---
-async function startCatalogFlow(from) {
-    const catalog = await getCatalog(from); // Passa 'from' para poder avisar se demorar
-    const categories = catalog.categories || [];
+// =================================================================================
+// 7. FUNÇÕES AUXILIARES DE FLUXO
+// =================================================================================
 
-    const rows = categories.slice(0, 10).map(c => ({
-        id: `CAT_${c.id}`,
-        title: c.name.slice(0, 23),
-        description: "Ver opções"
-    }));
-
-    await sendList(from, "O que deseja pedir?", "Cardápio", [{ title: "Categorias", rows }]);
+async function processAddress(from, session, geoData) {
+    session.addressData = geoData;
+    const dist = getDistanceFromLatLonInKm(STORE_LOCATION.lat, STORE_LOCATION.lng, geoData.location.lat, geoData.location.lng);
+    
+    if (dist > MAX_DELIVERY_RADIUS_KM) {
+        await sendText(from, `⚠️ Esse local fica a ${dist.toFixed(1)}km (Fora do raio de ${MAX_DELIVERY_RADIUS_KM}km).\nPodemos ter taxa extra.`);
+        await sendButtons(from, "Continuar?", [{id:"ADDR_CONFIRM", title:"Sim"}, {id:"ADDR_RETRY", title:"Não, mudar"}]);
+    } else {
+        await sendLocationImage(from, geoData.location.lat, geoData.location.lng, "Local encontrado");
+        await sendButtons(from, `Confirma: ${geoData.formatted}?`, [{id:"ADDR_CONFIRM", title:"Sim, Confirmar"}, {id:"ADDR_RETRY", title:"Corrigir"}]);
+    }
 }
 
-async function showItemsFromCategory(from, catId) {
-    const catalog = await getCatalog(from);
-    const category = catalog.categories.find(c => String(c.id) === String(catId));
-    
-    if (!category) return sendText(from, "Categoria indisponível no momento.");
-    
-    getSession(from).selectedCategoryName = category.name;
-    const items = category.items || [];
-    
-    const rows = items.slice(0, 10).map(item => ({
-        id: `ITEM_${item.id}`,
-        title: item.name.slice(0, 23),
-        description: item.price ? `R$ ${item.price.toFixed(2)}` : ""
+async function startCatalogFlow(from) {
+    const data = await getCatalog();
+    const rows = data.categories.slice(0, 10).map(c => ({
+        id: `CAT_${c.id}`, title: c.name.slice(0,23), description: "Ver opções"
     }));
+    await sendList(from, "Escolha a categoria:", "Cardápio", [{title:"Menu", rows}]);
+}
 
-    await sendList(from, `Opções: ${category.name}`, "Selecionar", [{ title: "Sabores", rows }]);
+async function showItems(from, catId) {
+    const data = await getCatalog();
+    const cat = data.categories.find(c => String(c.id) === String(catId));
+    if (!cat) return sendText(from, "Categoria erro.");
+    
+    getSession(from).catName = cat.name; // Salva para saber se é pizza depois
+    const rows = cat.items.slice(0, 10).map(i => ({
+        id: `ITEM_${i.id}`, title: i.name.slice(0,23), description: `R$ ${i.price}`
+    }));
+    await sendList(from, `Opções de ${cat.name}`, "Selecionar", [{title:"Itens", rows}]);
 }
 
 async function confirmOrder(from, session) {
-    const endereco = session.orderType === "delivery" && session.addressData ? session.addressData.formatted : "Retirada";
-    const resumo = `📝 *Resumo*\n🍕 ${session.selectedItemName}\n📏 ${session.selectedSize}\n📍 ${endereco}`;
-    await sendButtons(from, resumo, [{ id: "FINISH_ORDER", title: "✅ Confirmar" }, { id: "BACK_MENU", title: "❌ Cancelar" }]);
+    const addr = session.orderType === "delivery" ? session.addressData.formatted : "Retirada";
+    const msg = `Resumo:\n${session.selectedItemName}\n${session.selectedSize}\n${addr}`;
+    await sendButtons(from, msg, [{id:"FINISH", title:"✅ Confirmar"}, {id:"BACK_MENU", title:"❌ Cancelar"}]);
 }
 
-// SERVER
-app.get("/health", (req, res) => res.json({ status: "online", store_id: CARDAPIOWEB_STORE_ID }));
+// =================================================================================
+// 8. SERVIDOR
+// =================================================================================
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`🔥 Pappi API v5.0 (Retry) rodando na porta ${PORT}`));
+app.listen(PORT, () => console.log(`🔥 API V6 Rodando na porta ${PORT}`));

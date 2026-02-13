@@ -1,6 +1,6 @@
 /**
  * Pappi Pizza API - WhatsApp Cloud + Cardápio Web + Google Maps
- * Versão: ActionsGPT PRO (Humanizada)
+ * Versão: ActionsGPT PRO (Humanizada & Validada)
  * Node 18+ (fetch nativo)
  */
 
@@ -12,10 +12,10 @@ app.use(express.json({ limit: "10mb" }));
 
 // ===== 1. CONFIGURAÇÕES E CHAVES =====
 
-// Suas chaves fornecidas
+// Suas chaves (já configuradas conforme conversa anterior)
 const GOOGLE_MAPS_KEY = process.env.GOOGLE_MAPS_KEY || "AIzaSyBx8S4Rxzj3S74knuSrwnsJqEM1WCDKLj0"; 
 const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID || "939101245961363"; 
-const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN || ""; // Configure no Render
+const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN || ""; // Configure no Render (Environment Variables)
 const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN || "pappi_verify_token";
 
 // Configuração Cardápio Web
@@ -23,8 +23,7 @@ const CARDAPIOWEB_BASE_URL = "https://integracao.cardapioweb.com";
 const CARDAPIOWEB_TOKEN = process.env.CARDAPIOWEB_TOKEN || ""; 
 
 // Configuração da Loja (Pappi Pizza - Campinas)
-// Coordenadas aproximadas de Campinas (Centro) para cálculo de raio. 
-// O ideal é pegar a lat/long exata da sua loja no Google Maps e substituir aqui.
+// Coordenadas aproximadas de Campinas (Centro)
 const STORE_LOCATION = { lat: -22.90556, lng: -47.06083 }; 
 const MAX_DELIVERY_RADIUS_KM = 12;
 
@@ -54,13 +53,18 @@ function deg2rad(deg) { return deg * (Math.PI / 180); }
 
 // ===== 3. INTEGRAÇÕES =====
 
-// --- Google Maps ---
+// --- Google Maps (Aprimorado) ---
 async function googleGeocode(address) {
   if (!GOOGLE_MAPS_KEY) return null;
-  // Adiciona "Campinas" se o cliente não digitar, para ajudar o Google
-  const query = address.toLowerCase().includes("campinas") ? address : `${address}, Campinas - SP`;
+
+  // Se o cliente não digitou "Campinas", forçamos a busca na cidade
+  let query = address;
+  if (!normalizeText(address).includes("campinas")) {
+      query = `${address}, Campinas - SP`;
+  }
   
-  const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(query)}&key=${GOOGLE_MAPS_KEY}`;
+  // Adiciona components=country:BR para garantir Brasil
+  const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(query)}&components=country:BR&key=${GOOGLE_MAPS_KEY}`;
   
   try {
     const resp = await fetch(url);
@@ -208,6 +212,7 @@ app.post("/webhook", async (req, res) => {
         const from = msg.from;
         const msgType = msg.type;
         const text = msg.text?.body || "";
+        
         // Pega ID de botão ou lista
         const interactiveId = msg.interactive?.button_reply?.id || msg.interactive?.list_reply?.id;
         const interactiveTitle = msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title;
@@ -215,7 +220,7 @@ app.post("/webhook", async (req, res) => {
         const session = getSession(from);
         const input = normalizeText(text);
 
-        // --- COMANDOS GERAIS ---
+        // --- COMANDOS GERAIS (Reset) ---
         if (input === "menu" || input === "oi" || input === "ola" || interactiveId === "BACK_MENU") {
           resetSession(from);
           await sendText(from, "👋 Olá! Bem-vindo à *Pappi Pizza* 🍕\n\nSou seu assistente virtual. Posso te ajudar a pedir pizza, consultar cardápio ou falar com um humano.");
@@ -246,6 +251,11 @@ app.post("/webhook", async (req, res) => {
           continue;
         }
 
+        if (interactiveId === "BTN_HUMANO") {
+           await sendText(from, "👨‍🍳 Um atendente humano vai te responder em instantes! Aguarde um pouquinho.");
+           continue;
+        }
+
         // --- FLUXO: TIPO DE PEDIDO ---
         if (interactiveId === "TYPE_DELIVERY") {
           session.orderType = "delivery";
@@ -261,36 +271,67 @@ app.post("/webhook", async (req, res) => {
           continue;
         }
 
-     // --- Google Maps (Aprimorado) ---
-async function googleGeocode(address) {
-  if (!GOOGLE_MAPS_KEY) return null;
+        // --- FLUXO: VALIDAÇÃO DE ENDEREÇO (GOOGLE MAPS) ---
+        if (session.step === "ASK_ADDRESS" && !interactiveId) {
+            // 1. Validação básica de tamanho (evita "oi", ".", "rua 1")
+            if (input.length < 5) {
+                await sendText(from, "❌ Endereço muito curto ou inválido.\nPor favor, digite: *Rua, Número e Bairro*.");
+                return; // PARE AQUI. Não avança.
+            }
 
-  // Se o cliente não digitou "Campinas", a gente adiciona pra forçar a busca na cidade certa
-  let query = address;
-  if (!normalizeText(address).includes("campinas")) {
-      query = `${address}, Campinas - SP`;
-  }
-  
-  // Adiciona components=country:BR para garantir que é no Brasil
-  const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(query)}&components=country:BR&key=${GOOGLE_MAPS_KEY}`;
-  
-  try {
-    const resp = await fetch(url);
-    const data = await resp.json();
-    
-    if (data.status === "OK" && data.results.length > 0) {
-      const res = data.results[0];
-      return {
-        formatted: res.formatted_address,
-        location: res.geometry.location, // { lat, lng }
-        placeId: res.place_id
-      };
-    }
-  } catch (e) {
-    console.error("Erro Google Maps:", e);
-  }
-  return null;
-}
+            await sendText(from, "🔎 Verificando endereço no Google Maps...");
+            
+            // Chama a função atualizada (forçando Campinas)
+            const geoData = await googleGeocode(text);
+            
+            // 2. Se o Google não achou nada, BLOQUEIA.
+            if (!geoData) {
+                await sendText(from, "❌ Não consegui localizar esse endereço no mapa.\n\nTente digitar mais completo:\n*Ex: Rua das Flores, 123, Jardim Bandeira*");
+                return; // PARE AQUI.
+            }
+
+            // Salva dados na sessão temporariamente
+            session.addressData = geoData;
+            
+            // 3. Calcula distância
+            const dist = getDistanceFromLatLonInKm(
+                STORE_LOCATION.lat, STORE_LOCATION.lng,
+                geoData.location.lat, geoData.location.lng
+            );
+
+            // 4. Validação de Raio (12km)
+            if (dist > MAX_DELIVERY_RADIUS_KM) {
+                await sendLocationImage(from, geoData.location.lat, geoData.location.lng, "Local encontrado");
+                await sendText(from, `⚠️ O endereço *${geoData.formatted}* fica a ${dist.toFixed(1)}km da loja.\n\nNosso raio padrão é ${MAX_DELIVERY_RADIUS_KM}km. A entrega pode ter taxa extra ou não ser possível.`);
+                
+                await sendButtons(from, "Deseja continuar mesmo assim?", [
+                    { id: "ADDR_CONFIRM", title: "Sim, Continuar" },
+                    { id: "ADDR_RETRY", title: "Digitar Outro" }
+                ]);
+            } else {
+                await sendLocationImage(from, geoData.location.lat, geoData.location.lng, "É aqui mesmo?");
+                await sendText(from, `✅ Encontrei: *${geoData.formatted}*\n(Distância: ${dist.toFixed(1)}km)`);
+                
+                await sendButtons(from, "O endereço está correto?", [
+                    { id: "ADDR_CONFIRM", title: "Sim, Confirmar" },
+                    { id: "ADDR_RETRY", title: "Não, Corrigir" }
+                ]);
+            }
+            continue;
+        }
+
+        if (interactiveId === "ADDR_RETRY") {
+            session.step = "ASK_ADDRESS";
+            await sendText(from, "Ok, digite o endereço novamente:");
+            continue;
+        }
+
+        if (interactiveId === "ADDR_CONFIRM") {
+            session.step = "SELECT_CATEGORY";
+            await sendText(from, "Perfeito! Endereço anotado! 📝");
+            await startCatalogFlow(from);
+            continue;
+        }
 
         // --- FLUXO: CATÁLOGO (CATEGORIAS) ---
         // A função startCatalogFlow chama isso.
@@ -339,14 +380,14 @@ async function googleGeocode(address) {
         // --- FINALIZAÇÃO ---
         if (interactiveId === "FINISH_ORDER") {
             const totalEstimado = "A calcular"; // Aqui você somaria preços se tivesse puxado do JSON
-            const linkCheckout = `https://wa.me/5519982275105?text=${encodeURIComponent(`Olá, gostaria de finalizar meu pedido:\n- ${session.selectedItemName}\n- Tamanho: ${session.selectedSize}\n- Tipo: ${session.orderType}`)}`;
+            const linkCheckout = `https://wa.me/5519982275105?text=${encodeURIComponent(`Olá, gostaria de finalizar meu pedido:\n- ${session.selectedItemName}\n- Tamanho: ${session.selectedSize}\n- Tipo: ${session.orderType}\n(Endereço validado no sistema)`)}`;
             
             await sendText(from, `🥳 Pedido Enviado para a Cozinha!\n\nUm atendente vai confirmar o valor total e o tempo de entrega.\n\nSe quiser falar direto, clique aqui: ${linkCheckout}`);
             resetSession(from);
             continue;
         }
 
-        // Fallback para texto solto não entendido
+        // Fallback para texto solto não entendido (só se não estiver esperando endereço)
         if (!interactiveId && session.step !== "ASK_ADDRESS") {
              await sendText(from, "Não entendi sua resposta. Por favor, use os botões ou digite 'menu' para reiniciar.");
         }
@@ -361,7 +402,6 @@ async function startCatalogFlow(from) {
     const catalog = await getCatalog();
     if (!catalog) {
         await sendText(from, "Desculpe, sistema de cardápio está instável. Digite o nome da pizza que você quer:");
-        // Aqui poderia ir para um fluxo manual
         return;
     }
 
@@ -392,7 +432,6 @@ async function showItemsFromCategory(from, catId) {
     const items = category.items || [];
     
     // Limite do WhatsApp é 10 linhas por seção. Vamos pegar as primeiras 10.
-    // (Numa versão avançada, faríamos paginação)
     const rows = items.slice(0, 10).map(item => ({
         id: `ITEM_${item.id}`,
         title: item.name,

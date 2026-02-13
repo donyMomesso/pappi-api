@@ -261,56 +261,36 @@ app.post("/webhook", async (req, res) => {
           continue;
         }
 
-        // --- FLUXO: VALIDAÇÃO DE ENDEREÇO (GOOGLE MAPS) ---
-        if (session.step === "ASK_ADDRESS" && !interactiveId) {
-            await sendText(from, "🔎 Verificando endereço no Google Maps...");
-            
-            const geoData = await googleGeocode(text);
-            
-            if (!geoData) {
-                await sendText(from, "😕 Não consegui achar esse endereço exato.\nPode tentar digitar de novo com Bairro e Cidade?");
-                return;
-            }
+     // --- Google Maps (Aprimorado) ---
+async function googleGeocode(address) {
+  if (!GOOGLE_MAPS_KEY) return null;
 
-            // Salva dados na sessão
-            session.addressData = geoData;
-            
-            // Calcula distância
-            const dist = getDistanceFromLatLonInKm(
-                STORE_LOCATION.lat, STORE_LOCATION.lng,
-                geoData.location.lat, geoData.location.lng
-            );
-
-            if (dist > MAX_DELIVERY_RADIUS_KM) {
-                await sendLocationImage(from, geoData.location.lat, geoData.location.lng, "Local encontrado");
-                await sendText(from, `⚠️ Esse endereço fica a aprox. *${dist.toFixed(1)}km* da loja.\nNosso raio de entrega padrão é ${MAX_DELIVERY_RADIUS_KM}km.\n\nPodemos tentar chamar um motoboy parceiro, mas a taxa pode variar.`);
-                await sendButtons(from, "Deseja continuar mesmo assim?", [
-                    { id: "ADDR_CONFIRM", title: "Sim, Continuar" },
-                    { id: "ADDR_RETRY", title: "Digitar Outro" }
-                ]);
-            } else {
-                await sendLocationImage(from, geoData.location.lat, geoData.location.lng, "É aqui mesmo?");
-                await sendText(from, `✅ Encontrei: *${geoData.formatted}*`);
-                await sendButtons(from, "O endereço está correto?", [
-                    { id: "ADDR_CONFIRM", title: "Sim, Confirmar" },
-                    { id: "ADDR_RETRY", title: "Corrigir" }
-                ]);
-            }
-            continue;
-        }
-
-        if (interactiveId === "ADDR_RETRY") {
-            session.step = "ASK_ADDRESS";
-            await sendText(from, "Ok, digite o endereço novamente:");
-            continue;
-        }
-
-        if (interactiveId === "ADDR_CONFIRM") {
-            session.step = "SELECT_CATEGORY";
-            await sendText(from, "Endereço anotado! 📝");
-            await startCatalogFlow(from);
-            continue;
-        }
+  // Se o cliente não digitou "Campinas", a gente adiciona pra forçar a busca na cidade certa
+  let query = address;
+  if (!normalizeText(address).includes("campinas")) {
+      query = `${address}, Campinas - SP`;
+  }
+  
+  // Adiciona components=country:BR para garantir que é no Brasil
+  const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(query)}&components=country:BR&key=${GOOGLE_MAPS_KEY}`;
+  
+  try {
+    const resp = await fetch(url);
+    const data = await resp.json();
+    
+    if (data.status === "OK" && data.results.length > 0) {
+      const res = data.results[0];
+      return {
+        formatted: res.formatted_address,
+        location: res.geometry.location, // { lat, lng }
+        placeId: res.place_id
+      };
+    }
+  } catch (e) {
+    console.error("Erro Google Maps:", e);
+  }
+  return null;
+}
 
         // --- FLUXO: CATÁLOGO (CATEGORIAS) ---
         // A função startCatalogFlow chama isso.

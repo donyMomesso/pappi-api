@@ -1241,6 +1241,75 @@ app.listen(PORT, () => console.log("🔥 Pappi API rodando na porta", PORT));
  *    - No Portal do Cardápio Web: Configurações > Integrações > API > Webhooks
  *      URL: https://pappi-api.onrender.com/cardapioweb/webhook
  *      Token (opcional): CARDAPIOWEB_WEBHOOK_TOKEN (no Render)
+function calcDeliveryFeeKm(km) {
+  // ✅ REGRA PADRÃO (você ajusta depois)
+  if (km <= 3) return 5;
+  if (km <= 6) return 8;
+  if (km <= 10) return 12;
+  return null; // fora do raio
+}
+
+app.get("/maps/quote", async (req, res) => {
+  try {
+    const key = process.env.GOOGLE_MAPS_API_KEY;
+    const storeLat = Number(process.env.STORE_LAT);
+    const storeLng = Number(process.env.STORE_LNG);
+    const address = req.query.address;
+
+    if (!key) return res.status(500).json({ error: "missing_google_maps_key" });
+    if (!Number.isFinite(storeLat) || !Number.isFinite(storeLng))
+      return res.status(500).json({ error: "missing_store_lat_lng" });
+    if (!address) return res.status(400).json({ error: "address_required" });
+
+    // 1) Geocode do cliente
+    const geoUrl = new URL("https://maps.googleapis.com/maps/api/geocode/json");
+    geoUrl.searchParams.set("address", address);
+    geoUrl.searchParams.set("key", key);
+
+    const geoRes = await fetch(geoUrl);
+    const geo = await geoRes.json();
+    if (geo.status !== "OK" || !geo.results?.length) {
+      return res.status(422).json({ error: "geocode_failed", status: geo.status });
+    }
+
+    const best = geo.results[0];
+    const loc = best.geometry.location; // {lat,lng}
+
+    // 2) Distância/tempo
+    const dmUrl = new URL("https://maps.googleapis.com/maps/api/distancematrix/json");
+    dmUrl.searchParams.set("origins", `${storeLat},${storeLng}`);
+    dmUrl.searchParams.set("destinations", `${loc.lat},${loc.lng}`);
+    dmUrl.searchParams.set("mode", "driving");
+    dmUrl.searchParams.set("language", "pt-BR");
+    dmUrl.searchParams.set("key", key);
+
+    const dmRes = await fetch(dmUrl);
+    const dm = await dmRes.json();
+    const el = dm?.rows?.[0]?.elements?.[0];
+    if (!el || el.status !== "OK") {
+      return res.status(422).json({ error: "distance_failed", detail: el?.status || null });
+    }
+
+    const km = Math.round((el.distance.value / 1000) * 10) / 10;
+    const eta_minutes = Math.round(el.duration.value / 60);
+    const delivery_fee = calcDeliveryFeeKm(km);
+
+    return res.json({
+      store: { lat: storeLat, lng: storeLng },
+      address_input: address,
+      address_formatted: best.formatted_address,
+      place_id: best.place_id,
+      location: loc,
+      km,
+      eta_minutes,
+      delivery_fee,
+      is_serviceable: delivery_fee !== null
+    });
+  } catch (e) {
+    console.error("maps/quote error:", e);
+    return res.status(500).json({ error: "internal_error" });
+  }
+});
  */
 
 

@@ -1,9 +1,10 @@
 /**
- * Pappi Pizza API - WhatsApp Cloud + Cardápio Web + Google Address Confirm
+ * Pappi Pizza API - WhatsApp Cloud + Cardápio Web + Google Address Confirm + Maps Quote/Reverse
  * Node 18+ (fetch nativo)
  *
  * ✅ Fluxo humanizado + carrinho (multi-pizza) + observação por item + upsell
- * ✅ Endereço do delivery SÓ avança se confirmar no Google
+ * ✅ Endereço do delivery SÓ avança se confirmar no Google (texto OU localização)
+ * ✅ Calcula KM/ETA/Frete por regra (0-2=5 | 2-3=8 | 3-6=12 | 6-10=15 | >10 não atende)
  * ✅ Consulta "status 7637462" (Cardápio Web) + mapeamento amigável
  * ✅ Endpoints internos (pra Actions/Swagger):
  *    GET    /store
@@ -16,6 +17,9 @@
  * ✅ Webhooks:
  *    /webhook (Meta WhatsApp)
  *    /cardapioweb/webhook (Webhook do Cardápio Web - opcional)
+ * ✅ Maps:
+ *    GET /maps/quote?address=...
+ *    GET /maps/reverse?lat=...&lng=...
  */
 
 const express = require("express");
@@ -31,25 +35,30 @@ const PORT = process.env.PORT || 10000;
 const ATTENDANT_API_KEY = process.env.ATTENDANT_API_KEY || ""; // seu "X-API-Key" dos endpoints internos
 
 // --- WhatsApp Cloud ---
-const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN || "";
-const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID || "";
-const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN || "";
+const WHATSAPP_TOKEN = (process.env.WHATSAPP_TOKEN || "").trim().replace(/\s+/g, ""); // evita "Malformed token"
+const WHATSAPP_PHONE_NUMBER_ID = (process.env.WHATSAPP_PHONE_NUMBER_ID || "").trim();
+const WEBHOOK_VERIFY_TOKEN = (process.env.WEBHOOK_VERIFY_TOKEN || "").trim();
 
 // --- Cardápio Web (produção) ---
 const CARDAPIOWEB_BASE_URL = process.env.CARDAPIOWEB_BASE_URL || "https://integracao.cardapioweb.com";
-const CARDAPIOWEB_TOKEN = process.env.CARDAPIOWEB_TOKEN || ""; // X-API-KEY do CardápioWeb Partner
-const CARDAPIOWEB_STORE_ID = process.env.CARDAPIOWEB_STORE_ID || ""; // se a sua conta exigir
+const CARDAPIOWEB_TOKEN = (process.env.CARDAPIOWEB_TOKEN || "").trim(); // X-API-KEY do CardápioWeb Partner
+const CARDAPIOWEB_STORE_ID = (process.env.CARDAPIOWEB_STORE_ID || "").trim(); // se a sua conta exigir
 
 // --- Webhook token do Cardápio Web (opcional) ---
-const CARDAPIOWEB_WEBHOOK_TOKEN = process.env.CARDAPIOWEB_WEBHOOK_TOKEN || ""; // validado no header X-Webhook-Token
+const CARDAPIOWEB_WEBHOOK_TOKEN = (process.env.CARDAPIOWEB_WEBHOOK_TOKEN || "").trim(); // validado no header X-Webhook-Token
 
-// --- Google (confirmar endereço) ---
-const GOOGLE_MAPS_KEY = process.env.GOOGLE_MAPS_KEY || "";
+// --- Google (confirmar endereço / reverse / quote) ---
+// Padronizado para seu Render: GOOGLE_MAPS_API_KEY
+const GOOGLE_MAPS_KEY = (process.env.GOOGLE_MAPS_API_KEY || "").trim();
 
 // Loja (pra sugerir Campinas automaticamente)
 const DEFAULT_CITY = "Campinas";
 const DEFAULT_STATE = "SP";
 const DEFAULT_COUNTRY = "BR";
+
+// Coordenadas da loja (Render env):
+const STORE_LAT = Number(process.env.STORE_LAT);
+const STORE_LNG = Number(process.env.STORE_LNG);
 
 // WhatsApp do atendimento (finalizar com humano)
 const HUMAN_WA_NUMBER = process.env.HUMAN_WA_NUMBER || "5519982275105"; // ajuste se quiser
@@ -80,6 +89,9 @@ function safeJsonParse(text) {
 function pickFirstNonEmpty(...vals) {
   for (const v of vals) if (v !== undefined && v !== null && String(v).trim() !== "") return v;
   return null;
+}
+function round1(n) {
+  return Math.round(n * 10) / 10;
 }
 
 // ======================================================
@@ -136,7 +148,6 @@ async function sendButtons(to, bodyText, buttons /* [{id,title}] */) {
 
 // Lista (para muitas opções)
 async function sendList(to, bodyText, buttonText, sections /* [{title, rows}] */) {
-  // limites WA: até 10 seções e 10 rows por seção
   const safeSections = (sections || []).slice(0, 10).map((s) => ({
     title: String(s.title || "Opções").slice(0, 24),
     rows: (s.rows || []).slice(0, 10).map((r) => ({
@@ -209,7 +220,7 @@ async function markOrderReady(orderId) {
 }
 
 // ======================================================
-// 5) GOOGLE GEOCODE (confirmar endereço)
+// 5) GOOGLE (geocode / reverse / distance)
 // ======================================================
 async function googleGeocodeCandidates(addressText) {
   if (!GOOGLE_MAPS_KEY) return [];
@@ -217,13 +228,12 @@ async function googleGeocodeCandidates(addressText) {
   const raw = String(addressText || "").trim();
   if (raw.length < 6) return [];
 
-  // força cidade/UF se não tiver
   const hasCity = normalizeText(raw).includes(normalizeText(DEFAULT_CITY));
   const query = hasCity ? raw : `${raw}, ${DEFAULT_CITY} - ${DEFAULT_STATE}`;
 
   const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(
     query
-  )}&components=country:${DEFAULT_COUNTRY}&key=${GOOGLE_MAPS_KEY}`;
+  )}&components=country:${DEFAULT_COUNTRY}&key=${GOOGLE_MAPS_KEY}&language=pt-BR`;
 
   try {
     const resp = await fetch(url);
@@ -232,13 +242,84 @@ async function googleGeocodeCandidates(addressText) {
 
     return data.results.slice(0, 5).map((r) => ({
       formatted: r.formatted_address,
-      location: r.geometry?.location,
+      location: r.geometry?.location, // {lat,lng}
       placeId: r.place_id,
+      raw: r,
     }));
   } catch (e) {
     console.error("Google geocode error:", e);
     return [];
   }
+}
+
+async function googleReverseGeocode(lat, lng) {
+  if (!GOOGLE_MAPS_KEY) return null;
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+
+  const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${encodeURIComponent(
+    `${lat},${lng}`
+  )}&key=${GOOGLE_MAPS_KEY}&language=pt-BR`;
+
+  const resp = await fetch(url);
+  const data = await resp.json().catch(() => ({}));
+
+  if (data.status !== "OK" || !data.results?.length) return null;
+  const best = data.results[0];
+  return {
+    formatted: best.formatted_address,
+    location: { lat, lng },
+    placeId: best.place_id,
+    raw: best,
+  };
+}
+
+function calcDeliveryFeeKm(km) {
+  // REGRA DO DONY (limpa e final)
+  // 0-2 = 5 | 2-3 = 8 | 3-6 = 12 | 6-10 = 15 | >10 = null (fora do raio)
+  if (km <= 2) return 5;
+  if (km <= 3) return 8;
+  if (km <= 6) return 12;
+  if (km <= 10) return 15;
+  return null;
+}
+
+async function mapsQuoteByLatLng(destLat, destLng) {
+  if (!GOOGLE_MAPS_KEY) {
+    return { ok: false, error: "missing_google_maps_key" };
+  }
+  if (!Number.isFinite(STORE_LAT) || !Number.isFinite(STORE_LNG)) {
+    return { ok: false, error: "missing_store_lat_lng" };
+  }
+  if (!Number.isFinite(destLat) || !Number.isFinite(destLng)) {
+    return { ok: false, error: "lat_lng_required" };
+  }
+
+  const dmUrl = new URL("https://maps.googleapis.com/maps/api/distancematrix/json");
+  dmUrl.searchParams.set("origins", `${STORE_LAT},${STORE_LNG}`);
+  dmUrl.searchParams.set("destinations", `${destLat},${destLng}`);
+  dmUrl.searchParams.set("mode", "driving");
+  dmUrl.searchParams.set("language", "pt-BR");
+  dmUrl.searchParams.set("key", GOOGLE_MAPS_KEY);
+
+  const dmRes = await fetch(dmUrl);
+  const dm = await dmRes.json().catch(() => ({}));
+  const el = dm?.rows?.[0]?.elements?.[0];
+
+  if (!el || el.status !== "OK") {
+    return { ok: false, error: "distance_failed", detail: el?.status || null, dm };
+  }
+
+  const km = round1(el.distance.value / 1000);
+  const eta_minutes = Math.round(el.duration.value / 60);
+  const delivery_fee = calcDeliveryFeeKm(km);
+
+  return {
+    ok: true,
+    km,
+    eta_minutes,
+    delivery_fee,
+    is_serviceable: delivery_fee !== null,
+  };
 }
 
 // ======================================================
@@ -248,15 +329,20 @@ async function googleGeocodeCandidates(addressText) {
  * session = {
  *   step: string,
  *   customer: { name, phone },
- *   fulfillment: { type, requested_at, address: {...}, address_confirmed, google: {...} },
- *   cart: [{ item_id, name, quantity, notes, modifiers: [{modifier_id,name,quantity,unit_price}] }],
- *   draftItem: { item_id, name, quantity, notes, modifiers, option_groups_pending... },
- *   lastOrderId: string|number|null,   // Cardápio Web order_id (se criar via API)
- *   lastOrderDisplayId: string|number|null,
+ *   fulfillment: {
+ *     type: delivery|takeout|null,
+ *     requested_at,
+ *     address: {street,number,neighborhood,city,state,zip,complement,reference}|null,
+ *     address_confirmed: boolean,
+ *     google: {formatted,location,placeId}|null,
+ *     quote: {km,eta_minutes,delivery_fee,is_serviceable}|null
+ *   },
+ *   cart: [...],
+ *   draftItem: {...},
+ *   addressCandidates: [...],
  * }
  */
 const sessions = new Map();
-
 // mapa simples: orderId -> whatsappPhone (pra webhook de status notificar)
 const orderPhoneIndex = new Map();
 
@@ -271,6 +357,7 @@ function getSession(phone) {
         address: null,
         address_confirmed: false,
         google: null,
+        quote: null,
       },
       cart: [],
       draftItem: null,
@@ -290,7 +377,6 @@ function resetSession(phone) {
 // 7) ESTRUTURA PADRÃO (QUE VOCÊ PEDIU) - MONTADORES
 // ======================================================
 function buildOrderPayloadFromSession(session) {
-  // monta no formato que você mandou
   const payload = {
     channel: "whatsapp",
     store_id: "pappi_pizza",
@@ -302,12 +388,15 @@ function buildOrderPayloadFromSession(session) {
       type: session.fulfillment?.type || "delivery",
       requested_at: session.fulfillment?.requested_at || null,
       address: session.fulfillment?.type === "delivery" ? session.fulfillment?.address || null : null,
+      google_formatted: session.fulfillment?.google?.formatted || null,
+      delivery_km: session.fulfillment?.quote?.km ?? null,
+      delivery_eta_minutes: session.fulfillment?.quote?.eta_minutes ?? null,
     },
     items: (session.cart || []).map((it) => ({
       item_id: Number(it.item_id),
       name: it.name,
       quantity: Number(it.quantity || 1),
-      unit_price: it.unit_price ?? null, // no fluxo do WA a gente NÃO usa preço; aqui fica null
+      unit_price: it.unit_price ?? null,
       notes: it.notes || null,
       modifiers: (it.modifiers || []).map((m) => ({
         modifier_id: Number(m.modifier_id),
@@ -319,7 +408,7 @@ function buildOrderPayloadFromSession(session) {
     pricing: {
       subtotal: null,
       discount: { type: "fixed", value: 0, coupon: null },
-      delivery_fee: null,
+      delivery_fee: session.fulfillment?.quote?.delivery_fee ?? null,
       service_fee: 0,
       total: null,
     },
@@ -354,7 +443,6 @@ function buildCreatedOrderResponse({ order_id }) {
 // 8) CATÁLOGO: helpers pra mostrar categorias/itens e achar por texto
 // ======================================================
 async function catalogGetSafe() {
-  // se der erro de token inválido (4010), a gente avisa no log e segue com fallback (mínimo)
   try {
     return await getCatalog();
   } catch (e) {
@@ -430,7 +518,6 @@ async function showItemsFromCategory(from, catId) {
 }
 
 async function showOptionGroupAsList(from, og, prefixId) {
-  // og: {id,name,choice_type,minimum_quantity,maximum_quantity,options[]}
   const rows = (og?.options || [])
     .filter((o) => o?.status === "ACTIVE")
     .slice(0, 10)
@@ -465,7 +552,7 @@ async function askOrderType(from) {
 async function askAddress(from) {
   await sendText(
     from,
-    `Perfeito. Manda seu endereço assim:\n\nRua, número - bairro\n\nEx: Rua Rodolfo Gotardelo, 35 - Jardim das Bandeiras`
+    `Perfeito. Você pode mandar:\n\n1) *Endereço* (rua, número - bairro)\n2) *Ou a sua localização* (📎 → Localização)\n\nEx: Rua Rodolfo Gotardelo, 35 - Jardim das Bandeiras`
   );
 }
 
@@ -473,7 +560,7 @@ async function confirmAddressFromCandidates(from, session, candidates) {
   if (!candidates || candidates.length === 0) {
     await sendText(
       from,
-      "Não consegui confirmar esse endereço no Google 😕\nTenta mandar com *rua + número + bairro*."
+      "Não consegui confirmar esse endereço no Google 😕\nTenta mandar com *rua + número + bairro* ou envie a *localização*."
     );
     session.step = "ASK_ADDRESS";
     return;
@@ -515,7 +602,6 @@ async function askAnythingElse(from) {
 }
 
 async function upsellNudge(from) {
-  // Upsell leve e humanizado
   await sendButtons(from, "Dica rápida 😄 Quer colocar uma bebida junto pra fechar perfeito?", [
     { id: "UPSELL_DRINKS", title: "🥤 Ver bebidas" },
     { id: "UPSELL_SKIP", title: "Agora não" },
@@ -550,11 +636,14 @@ async function sendCartSummary(from, session) {
       ? `📍 Entrega: ${session.fulfillment?.google?.formatted || "(confirmado no Google)"}`
       : `🏃 Retirada na loja`;
 
-  await sendText(from, `🧾 *Seu pedido até agora*\n${header}\n\n${lines.join("\n")}`);
+  const quote = session.fulfillment?.quote?.ok
+    ? `\n🛵 Frete: R$${session.fulfillment.quote.delivery_fee} | ${session.fulfillment.quote.km} km | ~${session.fulfillment.quote.eta_minutes} min`
+    : "";
+
+  await sendText(from, `🧾 *Seu pedido até agora*\n${header}${quote}\n\n${lines.join("\n")}`);
 }
 
 async function finalizeToHuman(from, session) {
-  // monta texto e manda link wa.me pro atendente
   const orderPayload = buildOrderPayloadFromSession(session);
 
   const text =
@@ -563,7 +652,10 @@ async function finalizeToHuman(from, session) {
     `Telefone: ${orderPayload.customer.phone}\n` +
     `Tipo: ${orderPayload.fulfillment.type}\n` +
     (orderPayload.fulfillment.type === "delivery" && orderPayload.fulfillment.address
-      ? `Endereço: ${orderPayload.fulfillment.address.street || ""}, ${orderPayload.fulfillment.address.number || ""} - ${
+      ? `Endereço (Google): ${orderPayload.fulfillment.google_formatted || "-"}\n` +
+        `KM/ETA: ${orderPayload.fulfillment.delivery_km ?? "-"} km / ${orderPayload.fulfillment.delivery_eta_minutes ?? "-"} min\n` +
+        `Frete: R$${orderPayload.pricing.delivery_fee ?? "-"}\n` +
+        `Endereço (campos): ${orderPayload.fulfillment.address.street || ""} ${orderPayload.fulfillment.address.number || ""} - ${
           orderPayload.fulfillment.address.neighborhood || ""
         }\nCompl: ${orderPayload.fulfillment.address.complement || "-"}\nRef: ${orderPayload.fulfillment.address.reference || "-"}\n`
       : "") +
@@ -585,7 +677,6 @@ async function finalizeToHuman(from, session) {
 // 10) STATUS (Cardápio Web) - parser e resposta
 // ======================================================
 function extractStatusOrderIdFromText(text) {
-  // aceita: "status 7637462" / "meu pedido 763..." / "pedido 763..."
   const t = normalizeText(text);
   const m = t.match(/\b(status|pedido|meu pedido)\s*(#|:)?\s*([0-9]{3,})\b/);
   if (!m) return null;
@@ -618,17 +709,17 @@ async function handleStatusInquiry(from, orderId) {
     const st = order?.status;
     const pt = mapOrderStatusPt(st);
 
-    const when =
-      order?.estimated_time != null
-        ? `\n⏱️ Previsão: ~${order.estimated_time} min`
-        : "";
-
+    const when = order?.estimated_time != null ? `\n⏱️ Previsão: ~${order.estimated_time} min` : "";
     const type = order?.order_type ? `\n📦 Tipo: ${order.order_type}` : "";
     const disp = order?.display_id != null ? `\n🧾 Nº: ${order.display_id}` : "";
 
-    await sendText(from, `✅ Status do pedido *${orderId}*:${disp}\n*${pt}*${type}${when}\n\nSe estiver demorando, eu fico de olho e te aviso 🙏`);
+    await sendText(
+      from,
+      `✅ Status do pedido *${orderId}*:${disp}\n*${pt}*${type}${when}\n\nSe estiver demorando, eu fico de olho e te aviso 🙏`
+    );
   } catch (e) {
-    const isToken = String(e?.message || "").toLowerCase().includes("token") || e?.status === 401 || e?.status === 403;
+    const isToken =
+      String(e?.message || "").toLowerCase().includes("token") || e?.status === 401 || e?.status === 403;
     if (isToken) {
       await sendText(
         from,
@@ -657,6 +748,7 @@ function extractIncomingMessages(body) {
           id: m.id,
           type: m.type,
           text: m.text?.body || "",
+          location: m.location || null,
           interactive: m.interactive?.button_reply || m.interactive?.list_reply || null,
           raw: m,
         });
@@ -667,14 +759,14 @@ function extractIncomingMessages(body) {
 }
 
 // ======================================================
-// 12) ROTAS BASICAS
+// 12) ROTAS BÁSICAS + DEBUG
 // ======================================================
 app.get("/", (req, res) => res.status(200).send("Pappi API online ✅"));
 
 app.get("/health", (req, res) => {
   res.status(200).json({
     ok: true,
-    app: "Pappi Pizza API",
+    app: "API da Pappi Pizza",
     time: nowIso(),
   });
 });
@@ -690,8 +782,69 @@ app.get("/debug-auth", (req, res) => {
     hasCardapioWebToken: Boolean(CARDAPIOWEB_TOKEN),
     hasCardapioWebStoreId: Boolean(CARDAPIOWEB_STORE_ID),
     hasGoogleMapsKey: Boolean(GOOGLE_MAPS_KEY),
+    hasStoreLatLng: Number.isFinite(STORE_LAT) && Number.isFinite(STORE_LNG),
     hasCardapioWebWebhookToken: Boolean(CARDAPIOWEB_WEBHOOK_TOKEN),
   });
+});
+
+// ======================================================
+// 12.1) MAPS (Quote / Reverse)
+// ======================================================
+
+// GET /maps/quote?address=...
+app.get("/maps/quote", async (req, res) => {
+  try {
+    const address = String(req.query.address || "").trim();
+    if (!address) return res.status(400).json({ error: "address_required" });
+
+    const candidates = await googleGeocodeCandidates(address);
+    if (!candidates.length || !candidates[0]?.location) {
+      return res.status(422).json({ error: "geocode_failed", status: "NO_RESULTS" });
+    }
+
+    const best = candidates[0];
+    const loc = best.location;
+
+    const quote = await mapsQuoteByLatLng(Number(loc.lat), Number(loc.lng));
+    if (!quote.ok) return res.status(422).json(quote);
+
+    return res.json({
+      store: { lat: STORE_LAT, lng: STORE_LNG },
+      address_input: address,
+      address_formatted: best.formatted,
+      place_id: best.placeId,
+      location: loc,
+      ...quote,
+      message: quote.is_serviceable ? null : "Infelizmente ainda não entregamos nessa região 🙏",
+    });
+  } catch (e) {
+    console.error("maps/quote error:", e);
+    return res.status(500).json({ error: "internal_error" });
+  }
+});
+
+// GET /maps/reverse?lat=...&lng=...
+app.get("/maps/reverse", async (req, res) => {
+  try {
+    const lat = Number(req.query.lat);
+    const lng = Number(req.query.lng);
+
+    if (!GOOGLE_MAPS_KEY) return res.status(500).json({ error: "missing_google_maps_key" });
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return res.status(400).json({ error: "lat_lng_required" });
+
+    const best = await googleReverseGeocode(lat, lng);
+    if (!best) return res.status(422).json({ error: "reverse_geocode_failed" });
+
+    return res.json({
+      lat,
+      lng,
+      formatted_address: best.formatted,
+      place_id: best.placeId,
+    });
+  } catch (e) {
+    console.error("maps/reverse error:", e);
+    return res.status(500).json({ error: "internal_error" });
+  }
 });
 
 // ======================================================
@@ -706,14 +859,13 @@ function requireApiKey(req, res, next) {
 
 // GET /store
 app.get("/store", requireApiKey, async (req, res) => {
-  // Se você tiver endpoint do Cardápio Web para establishment, pode puxar aqui.
-  // Por enquanto, retornamos dados básicos fixos + link do cardápio.
   res.json({
     store_id: "pappi_pizza",
     name: "Pappi Pizza",
     city: DEFAULT_CITY,
     state: DEFAULT_STATE,
     menu_url: "https://app.cardapioweb.com/pappi_pizza?s=dony",
+    store_location: Number.isFinite(STORE_LAT) && Number.isFinite(STORE_LNG) ? { lat: STORE_LAT, lng: STORE_LNG } : null,
   });
 });
 
@@ -734,16 +886,14 @@ app.post("/customers", requireApiKey, async (req, res) => {
   res.json({ ok: true, customer: { name: name || null, phone: String(phone) } });
 });
 
-// POST /orders  (cria pedido interno no seu padrão)
+// POST /orders (cria pedido interno no seu padrão)
 app.post("/orders", requireApiKey, async (req, res) => {
-  // aqui você receberia o JSON no formato que você mandou e poderia enviar ao Cardápio Web se existir endpoint de criação
   const body = req.body || {};
   if (!body.customer?.phone) return res.status(400).json({ error: "customer.phone é obrigatório" });
-  // retorno padrão que você mandou:
   res.json(buildCreatedOrderResponse({ order_id: body.order_id || `ORD-${Date.now()}` }));
 });
 
-// GET /orders/:orderId  (consulta Cardápio Web)
+// GET /orders/:orderId (consulta Cardápio Web)
 app.get("/orders/:orderId", requireApiKey, async (req, res) => {
   try {
     const data = await getOrderById(req.params.orderId);
@@ -753,7 +903,7 @@ app.get("/orders/:orderId", requireApiKey, async (req, res) => {
   }
 });
 
-// PATCH /orders/:orderId/status  (ex: marcar pronto)
+// PATCH /orders/:orderId/status (ex: marcar pronto)
 app.patch("/orders/:orderId/status", requireApiKey, async (req, res) => {
   const { status } = req.body || {};
   try {
@@ -808,7 +958,7 @@ app.post("/webhook", async (req, res) => {
       const interactiveTitle = msg.interactive?.title || null;
 
       // ---------------------------
-      // 1) Atalhos / reset / menu
+      // 0) Status por texto
       // ---------------------------
       const statusIdFromText = extractStatusOrderIdFromText(textRaw);
       if (statusIdFromText) {
@@ -816,6 +966,37 @@ app.post("/webhook", async (req, res) => {
         continue;
       }
 
+      // ---------------------------
+      // 0.1) Se o cliente mandou LOCALIZAÇÃO (WhatsApp)
+      // ---------------------------
+      if (msg.type === "location" && msg.location) {
+        const lat = Number(msg.location.latitude);
+        const lng = Number(msg.location.longitude);
+
+        await sendText(from, "📍 Recebi sua localização! Só um segundinho… vou confirmar o endereço no Google 🙏");
+
+        const best = await googleReverseGeocode(lat, lng);
+        if (!best) {
+          session.step = "ASK_ADDRESS";
+          await sendText(from, "Não consegui identificar o endereço 😕\nTenta enviar a localização novamente ou manda rua + número + bairro.");
+          continue;
+        }
+
+        // Armazena como candidato único e pede confirmação
+        session.addressCandidates = [best];
+        session.step = "CONFIRM_ADDRESS";
+        await sendText(from, `Encontrei este endereço:\n*${best.formatted}*\n\nConfirma pra mim? 🙂`);
+        await sendButtons(from, "Está correto?", [
+          { id: "ADDR_CONFIRM_0", title: "✅ Confirmar" },
+          { id: "ADDR_RETRY", title: "✏️ Corrigir" },
+          { id: "BACK_MENU", title: "⬅️ Menu" },
+        ]);
+        continue;
+      }
+
+      // ---------------------------
+      // 1) Atalhos / reset / menu
+      // ---------------------------
       if (
         normalized === "menu" ||
         normalized === "inicio" ||
@@ -860,6 +1041,8 @@ app.post("/webhook", async (req, res) => {
       if (interactiveId === "TYPE_DELIVERY") {
         session.fulfillment.type = "delivery";
         session.fulfillment.address_confirmed = false;
+        session.fulfillment.google = null;
+        session.fulfillment.quote = null;
         session.step = "ASK_ADDRESS";
         await askAddress(from);
         continue;
@@ -869,6 +1052,8 @@ app.post("/webhook", async (req, res) => {
         session.fulfillment.type = "takeout";
         session.fulfillment.address = null;
         session.fulfillment.address_confirmed = true;
+        session.fulfillment.google = null;
+        session.fulfillment.quote = null;
         session.step = "SELECT_CATEGORY";
         await sendText(from, "Perfeito 🙂 Retirada na loja. Agora vamos escolher os itens!");
         await showCategories(from);
@@ -882,7 +1067,6 @@ app.post("/webhook", async (req, res) => {
         await sendText(from, "🔎 Só um segundinho… tô confirmando no Google pra não dar erro na entrega 🙏");
         const candidates = await googleGeocodeCandidates(textRaw);
 
-        // NÃO AVANÇA sem confirmar
         await confirmAddressFromCandidates(from, session, candidates);
         continue;
       }
@@ -909,26 +1093,48 @@ app.post("/webhook", async (req, res) => {
         session.step = "ASK_ADDRESS";
         session.fulfillment.address_confirmed = false;
         session.fulfillment.google = null;
-        await sendText(from, "Tranquilo 🙂 Manda o endereço de novo (rua, número e bairro).");
+        session.fulfillment.quote = null;
+        await sendText(from, "Tranquilo 🙂 Manda o endereço de novo (rua, número e bairro) ou envie a localização.");
         continue;
       }
 
       if (interactiveId && String(interactiveId).startsWith("ADDR_CONFIRM_")) {
         const idx = Number(String(interactiveId).replace("ADDR_CONFIRM_", ""));
         const chosen = session.addressCandidates?.[idx];
-        if (!chosen) {
+        if (!chosen || !chosen.location) {
           await sendText(from, "Ops, não consegui confirmar 😕 Manda o endereço novamente, por favor.");
           session.step = "ASK_ADDRESS";
           continue;
         }
 
         // Salva endereço confirmado
-        session.fulfillment.google = chosen;
+        session.fulfillment.google = {
+          formatted: chosen.formatted,
+          location: chosen.location,
+          placeId: chosen.placeId,
+        };
         session.fulfillment.address_confirmed = true;
 
-        // tenta extrair componentes pro seu JSON padrão
+        // Faz quote (km/eta/frete)
+        const quote = await mapsQuoteByLatLng(Number(chosen.location.lat), Number(chosen.location.lng));
+        session.fulfillment.quote = quote.ok ? quote : null;
+
+        if (quote.ok && !quote.is_serviceable) {
+          // fora do raio
+          session.step = "ASK_ADDRESS";
+          session.fulfillment.address_confirmed = false;
+          session.fulfillment.google = null;
+          session.fulfillment.quote = null;
+          await sendText(
+            from,
+            `😕 Esse endereço ficou *fora da nossa área de entrega*.\nSe quiser, você pode optar por *retirada* ou mandar outro endereço.`
+          );
+          await askOrderType(from);
+          continue;
+        }
+
+        // Campos mínimos (o humano finaliza)
         const formatted = chosen.formatted || "";
-        // como o geocode já confirmou, a gente guarda no mínimo street/number e completa no humano
         session.fulfillment.address = {
           street: null,
           number: null,
@@ -939,23 +1145,26 @@ app.post("/webhook", async (req, res) => {
           complement: null,
           reference: null,
         };
-
-        // (Simples) pega primeiro pedaço do formatted
         const first = formatted.split(",")[0] || "";
         session.fulfillment.address.street = first.trim() || null;
 
         session.step = "SELECT_CATEGORY";
-        await sendText(from, "✅ Endereço confirmado no Google! Agora bora escolher o pedido 🍕");
+
+        const freteTxt =
+          quote.ok && quote.is_serviceable
+            ? `\n🛵 Frete: *R$${quote.delivery_fee}* | ${quote.km} km | ~${quote.eta_minutes} min`
+            : "";
+
+        await sendText(from, `✅ Endereço confirmado no Google!${freteTxt}\nAgora bora escolher o pedido 🍕`);
         await showCategories(from);
         continue;
       }
 
-      // Se delivery e ainda não confirmou endereço, bloqueia qualquer avanço de pedido
+      // Se delivery e ainda não confirmou endereço, bloqueia qualquer avanço
       if (session.fulfillment?.type === "delivery" && session.fulfillment.address_confirmed === false) {
-        // deixa o cliente falar, mas conduz de volta
         if (session.step !== "ASK_ADDRESS" && session.step !== "PICK_ADDRESS" && session.step !== "CONFIRM_ADDRESS") {
           session.step = "ASK_ADDRESS";
-          await sendText(from, "Antes de montar o pedido, preciso confirmar seu endereço no Google 🙏\nManda rua + número + bairro.");
+          await sendText(from, "Antes de montar o pedido, preciso confirmar seu endereço no Google 🙏\nManda rua + número + bairro ou envie a localização.");
         }
       }
 
@@ -971,7 +1180,6 @@ app.post("/webhook", async (req, res) => {
 
       if (interactiveId && String(interactiveId).startsWith("ITEM_")) {
         const itemId = String(interactiveId).replace("ITEM_", "");
-        // cria draft do item
         session.draftItem = {
           item_id: Number(itemId),
           name: interactiveTitle || "Item selecionado",
@@ -979,14 +1187,13 @@ app.post("/webhook", async (req, res) => {
           notes: null,
           modifiers: [],
           option_groups: null,
-          option_pick: {}, // ogId -> optionId
+          option_pick: {},
         };
 
-        // Busca detalhes do item no catálogo para option_groups
         const catalog = await catalogGetSafe();
-        const item = findItemByNameInCatalog(catalog, session.draftItem.name) ||
+        const item =
+          findItemByNameInCatalog(catalog, session.draftItem.name) ||
           (() => {
-            // fallback: varre por id
             for (const c of catalog.categories || []) {
               for (const it of c.items || []) if (String(it.id) === String(itemId)) return it;
             }
@@ -995,7 +1202,6 @@ app.post("/webhook", async (req, res) => {
 
         session.draftItem.option_groups = item?.option_groups || [];
 
-        // Pergunta observação primeiro (como você pediu)
         session.step = "ASK_ITEM_OBS";
         await askItemObservation(from, session.draftItem.name);
         continue;
@@ -1005,14 +1211,12 @@ app.post("/webhook", async (req, res) => {
       if (interactiveId === "OBS_NONE" && session.step === "ASK_ITEM_OBS") {
         session.draftItem.notes = null;
 
-        // Se tiver option_groups, perguntar o primeiro
         const ogs = session.draftItem.option_groups || [];
         if (ogs.length > 0) {
           session.step = "PICK_OPTION_GROUP";
           session._ogIndex = 0;
           await showOptionGroupAsList(from, ogs[0], `OG_${ogs[0].id}`);
         } else {
-          // vai direto adicionar ao carrinho
           session.cart.push({ ...session.draftItem });
           session.draftItem = null;
           await sendText(from, "Perfeito! Adicionei no seu pedido ✅");
@@ -1048,9 +1252,8 @@ app.post("/webhook", async (req, res) => {
 
       // Opções (option groups)
       if (interactiveId && String(interactiveId).includes("_OPT_") && session.step === "PICK_OPTION_GROUP") {
-        // formato: OG_<ogId>_OPT_<optId>
         const parts = String(interactiveId).split("_OPT_");
-        const left = parts[0]; // OG_<ogId>
+        const left = parts[0];
         const optId = Number(parts[1]);
         const ogId = Number(left.replace("OG_", ""));
 
@@ -1073,7 +1276,6 @@ app.post("/webhook", async (req, res) => {
 
         session.draftItem.option_pick[String(ogId)] = optId;
 
-        // próximo option_group?
         const nextIndex = Number(session._ogIndex || 0) + 1;
         if (nextIndex < ogs.length) {
           session._ogIndex = nextIndex;
@@ -1081,7 +1283,6 @@ app.post("/webhook", async (req, res) => {
           continue;
         }
 
-        // terminou: adiciona carrinho
         session.cart.push({ ...session.draftItem });
         session.draftItem = null;
         session._ogIndex = 0;
@@ -1095,7 +1296,6 @@ app.post("/webhook", async (req, res) => {
       // Upsell: bebidas
       if (interactiveId === "UPSELL_DRINKS") {
         session.step = "SELECT_CATEGORY";
-        // tenta encontrar "Bebidas"
         const catalog = await catalogGetSafe();
         const bebidas = findCategoryByName(catalog, "bebida");
         if (bebidas) {
@@ -1118,7 +1318,6 @@ app.post("/webhook", async (req, res) => {
       }
 
       if (interactiveId === "ADD_NO") {
-        // Finaliza pro humano (checkout)
         await sendCartSummary(from, session);
         await sendButtons(from, "Só confirma pra mim: tá tudo certo assim? 🙂", [
           { id: "CONFIRM_FINISH", title: "✅ Confirmar" },
@@ -1137,9 +1336,7 @@ app.post("/webhook", async (req, res) => {
       // ---------------------------
       // 6) Fallback inteligente (texto livre)
       // ---------------------------
-      // se o cliente digitar algo como "quero calabresa"
       if (normalized.includes("quero") || normalized.includes("pizza") || normalized.length >= 3) {
-        // se ele ainda não escolheu tipo:
         if (session.step === "MENU") {
           await sendText(from, "Entendi 🙂 Vou te ajudar rapidinho.");
           await askOrderType(from);
@@ -1147,7 +1344,6 @@ app.post("/webhook", async (req, res) => {
           continue;
         }
 
-        // se ele já está escolhendo itens, tenta achar item pelo texto
         if (["SELECT_CATEGORY", "SELECT_ITEM"].includes(session.step)) {
           const catalog = await catalogGetSafe();
           const item = findItemByNameInCatalog(catalog, textRaw);
@@ -1168,7 +1364,6 @@ app.post("/webhook", async (req, res) => {
         }
       }
 
-      // fallback geral: mostra menu
       await sendText(from, "Beleza 🙂 Pra ficar fácil, escolhe uma opção aqui embaixo:");
       await showMainMenu(from);
     }
@@ -1179,37 +1374,23 @@ app.post("/webhook", async (req, res) => {
 
 // ======================================================
 // 15) WEBHOOK CARDÁPIO WEB (opcional)
-//  - Você cadastra no Portal do Cardápio Web a URL:
-//    https://pappi-api.onrender.com/cardapioweb/webhook
-//  - E (opcional) define um token, que chega em X-Webhook-Token
 // ======================================================
 app.post("/cardapioweb/webhook", async (req, res) => {
-  // precisa responder 200 em até 5s
   try {
     const token = req.header("X-Webhook-Token") || "";
     if (CARDAPIOWEB_WEBHOOK_TOKEN && token !== CARDAPIOWEB_WEBHOOK_TOKEN) {
       return res.status(401).json({ ok: false, error: "Invalid webhook token" });
     }
 
-    // responde rápido
     res.status(200).json({ ok: true });
 
-    // tente interpretar evento (depende do payload real do CardápioWeb)
     const payload = req.body || {};
-    const orderId =
-      payload?.order_id ||
-      payload?.resource?.id ||
-      payload?.data?.id ||
-      payload?.id ||
-      null;
-
+    const orderId = payload?.order_id || payload?.resource?.id || payload?.data?.id || payload?.id || null;
     if (!orderId) return;
 
-    // se tivermos o whatsapp do cliente indexado (quando criarmos pedido via API)
     const phone = orderPhoneIndex.get(String(orderId));
     if (!phone) return;
 
-    // puxa status atualizado e avisa
     try {
       const order = await getOrderById(orderId);
       const st = mapOrderStatusPt(order?.status);
@@ -1218,9 +1399,8 @@ app.post("/cardapioweb/webhook", async (req, res) => {
       console.error("Webhook notify error:", e?.message, e?.payload || "");
     }
   } catch (e) {
-    // se falhar antes de responder 200, CardápioWeb retenta
     console.error("CardapioWeb webhook error:", e);
-    return res.status(200).json({ ok: true }); // garante 200 pra não pausar
+    return res.status(200).json({ ok: true });
   }
 });
 
@@ -1228,88 +1408,4 @@ app.post("/cardapioweb/webhook", async (req, res) => {
 // 16) START
 // ======================================================
 app.listen(PORT, () => console.log("🔥 Pappi API rodando na porta", PORT));
-
-/**
- * ✅ ONDE “COLA” O /webhook?
- *
- * 1) /webhook = Webhook do WhatsApp Cloud (Meta)
- *    - No painel da Meta (WhatsApp Cloud), você cadastra a URL:
- *      https://pappi-api.onrender.com/webhook
- *    - E define o VERIFY TOKEN igual ao WEBHOOK_VERIFY_TOKEN no Render.
- *
- * 2) /cardapioweb/webhook = Webhook do Cardápio Web (opcional)
- *    - No Portal do Cardápio Web: Configurações > Integrações > API > Webhooks
- *      URL: https://pappi-api.onrender.com/cardapioweb/webhook
- *      Token (opcional): CARDAPIOWEB_WEBHOOK_TOKEN (no Render)
-function calcDeliveryFeeKm(km) {
-  // ✅ REGRA PADRÃO (você ajusta depois)
-  if (km <= 3) return 5;
-  if (km <= 6) return 8;
-  if (km <= 10) return 12;
-  return null; // fora do raio
-}
-
-app.get("/maps/quote", async (req, res) => {
-  try {
-    const key = process.env.GOOGLE_MAPS_API_KEY;
-    const storeLat = Number(process.env.STORE_LAT);
-    const storeLng = Number(process.env.STORE_LNG);
-    const address = req.query.address;
-
-    if (!key) return res.status(500).json({ error: "missing_google_maps_key" });
-    if (!Number.isFinite(storeLat) || !Number.isFinite(storeLng))
-      return res.status(500).json({ error: "missing_store_lat_lng" });
-    if (!address) return res.status(400).json({ error: "address_required" });
-
-    // 1) Geocode do cliente
-    const geoUrl = new URL("https://maps.googleapis.com/maps/api/geocode/json");
-    geoUrl.searchParams.set("address", address);
-    geoUrl.searchParams.set("key", key);
-
-    const geoRes = await fetch(geoUrl);
-    const geo = await geoRes.json();
-    if (geo.status !== "OK" || !geo.results?.length) {
-      return res.status(422).json({ error: "geocode_failed", status: geo.status });
-    }
-
-    const best = geo.results[0];
-    const loc = best.geometry.location; // {lat,lng}
-
-    // 2) Distância/tempo
-    const dmUrl = new URL("https://maps.googleapis.com/maps/api/distancematrix/json");
-    dmUrl.searchParams.set("origins", `${storeLat},${storeLng}`);
-    dmUrl.searchParams.set("destinations", `${loc.lat},${loc.lng}`);
-    dmUrl.searchParams.set("mode", "driving");
-    dmUrl.searchParams.set("language", "pt-BR");
-    dmUrl.searchParams.set("key", key);
-
-    const dmRes = await fetch(dmUrl);
-    const dm = await dmRes.json();
-    const el = dm?.rows?.[0]?.elements?.[0];
-    if (!el || el.status !== "OK") {
-      return res.status(422).json({ error: "distance_failed", detail: el?.status || null });
-    }
-
-    const km = Math.round((el.distance.value / 1000) * 10) / 10;
-    const eta_minutes = Math.round(el.duration.value / 60);
-    const delivery_fee = calcDeliveryFeeKm(km);
-
-    return res.json({
-      store: { lat: storeLat, lng: storeLng },
-      address_input: address,
-      address_formatted: best.formatted_address,
-      place_id: best.place_id,
-      location: loc,
-      km,
-      eta_minutes,
-      delivery_fee,
-      is_serviceable: delivery_fee !== null
-    });
-  } catch (e) {
-    console.error("maps/quote error:", e);
-    return res.status(500).json({ error: "internal_error" });
-  }
-});
- */
-
 

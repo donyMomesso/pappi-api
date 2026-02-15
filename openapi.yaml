@@ -1,678 +1,252 @@
-openapi: 3.1.0
-info:
-  title: Pappi API
-  version: 1.0.0
-  description: >
-    API da Pappi Pizza (WhatsApp + Cardápio Web). Endpoints para consultar loja, catálogo,
-    criar/consultar pedidos, atualizar status e finalizar via WhatsApp.
-servers:
-  - url: https://pappi-api.onrender.com
-    description: Produção (Render)
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Pappi Pizza Actions API (PRO)",
+    "version": "1.2.0",
+    "description": "API interna da Pappi Pizza para atendentes via GPT Actions. Públicos: /, /health, /meta, /debug-auth, /maps/quote, /maps/reverse. Protegidos por X-API-Key: /store, /catalog, /customers, /orders, /orders/{orderId}, /orders/{orderId}/status, /checkout/whatsapp."
+  },
+  "servers": [{ "url": "https://pappi-api.onrender.com" }],
+  "components": {
+    "securitySchemes": {
+      "AttendantApiKey": { "type": "apiKey", "in": "header", "name": "X-API-Key" }
+    },
+    "schemas": {
+      "HealthResponse": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean" },
+          "app": { "type": "string" },
+          "time": { "type": "string" }
+        }
+      },
+      "MetaResponse": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean" },
+          "app": { "type": "string" },
+          "version": { "type": "string" },
+          "env": {
+            "type": "object",
+            "properties": {
+              "hasWhatsapp": { "type": "boolean" },
+              "hasCardapioWeb": { "type": "boolean" },
+              "hasGoogleMaps": { "type": "boolean" },
+              "hasStoreLatLng": { "type": "boolean" }
+            }
+          },
+          "store": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "name": { "type": "string" },
+              "city": { "type": "string" },
+              "state": { "type": "string" },
+              "menu_url": { "type": "string" },
+              "whatsapp_human": { "type": "string" }
+            }
+          },
+          "time": { "type": "string" }
+        }
+      },
+      "DebugAuthResponse": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean" },
+          "hasAttendantKey": { "type": "boolean" },
+          "hasWhatsappToken": { "type": "boolean" },
+          "hasWhatsappPhoneNumberId": { "type": "boolean" },
+          "hasWebhookVerifyToken": { "type": "boolean" },
+          "cardapioWebBaseUrl": { "type": "string" },
+          "hasCardapioWebToken": { "type": "boolean" },
+          "hasCardapioWebStoreId": { "type": "boolean" },
+          "hasGoogleMapsKey": { "type": "boolean" },
+          "hasStoreLatLng": { "type": "boolean" },
+          "hasCardapioWebWebhookToken": { "type": "boolean" }
+        }
+      },
+      "StoreResponse": {
+        "type": "object",
+        "properties": {
+          "store_id": { "type": "string" },
+          "name": { "type": "string" },
+          "city": { "type": "string" },
+          "state": { "type": "string" },
+          "menu_url": { "type": "string" },
+          "store_location": {
+            "type": ["object", "null"],
+            "properties": { "lat": { "type": "number" }, "lng": { "type": "number" } }
+          }
+        }
+      },
+      "CustomerCreate": {
+        "type": "object",
+        "required": ["phone"],
+        "properties": { "name": { "type": "string" }, "phone": { "type": "string" } }
+      },
+      "CustomerCreateResponse": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean" },
+          "customer": {
+            "type": "object",
+            "properties": {
+              "name": { "type": ["string", "null"] },
+              "phone": { "type": "string" }
+            }
+          }
+        }
+      },
+      "OrderCreate": {
+        "type": "object",
+        "properties": {
+          "order_id": { "type": "string" },
+          "channel": { "type": "string" },
+          "store_id": { "type": "string" },
+          "customer": {
+            "type": "object",
+            "required": ["phone"],
+            "properties": { "name": { "type": "string" }, "phone": { "type": "string" } }
+          },
+          "fulfillment": { "type": "object" },
+          "items": { "type": "array", "items": { "type": "object" } },
+          "pricing": { "type": "object" },
+          "payment": { "type": "object" },
+          "notes": { "type": ["string", "null"] },
+          "meta": { "type": "object" }
+        }
+      },
+      "OrderCreatedResponse": {
+        "type": "object",
+        "properties": {
+          "order_id": { "type": "string" },
+          "status": { "type": "string" },
+          "created_at": { "type": "string" },
+          "estimated_delivery_minutes": { "type": ["integer", "null"] },
+          "payment": { "type": "object" },
+          "pricing": { "type": "object" }
+        }
+      },
+      "OrderStatusPatch": {
+        "type": "object",
+        "required": ["status"],
+        "properties": { "status": { "type": "string" } }
+      },
+      "CheckoutRequest": {
+        "type": "object",
+        "required": ["phone"],
+        "properties": { "phone": { "type": "string" }, "text": { "type": "string" } }
+      },
+      "CheckoutResponse": {
+        "type": "object",
+        "properties": { "ok": { "type": "boolean" }, "url": { "type": "string" } }
+      },
+      "MapsQuoteResponse": {
+        "type": "object",
+        "properties": {
+          "km": { "type": "number" },
+          "eta_minutes": { "type": "integer" },
+          "delivery_fee": { "type": ["number", "null"] },
+          "is_serviceable": { "type": "boolean" }
+        }
+      },
+      "MapsReverseResponse": {
+        "type": "object",
+        "properties": { "formatted_address": { "type": "string" } }
+      }
+    }
+  },
+  "security": [{ "AttendantApiKey": [] }],
+  "paths": {
+    "/": { "get": { "operationId": "root", "security": [], "responses": { "200": { "description": "OK" } } } },
+    "/health": {
+      "get": {
+        "operationId": "health",
+        "security": [],
+        "responses": {
+          "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/HealthResponse" } } } }
+        }
+      }
+    },
+    "/meta": {
+      "get": {
+        "operationId": "getMeta",
+        "security": [],
+        "responses": {
+          "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MetaResponse" } } } }
+        }
+      }
+    },
+    "/debug-auth": {
+      "get": {
+        "operationId": "debugAuth",
+        "security": [],
+        "responses": {
+          "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DebugAuthResponse" } } } }
+        }
+      }
+    },
+    "/maps/quote": {
+      "get": {
+        "operationId": "mapsQuote",
+        "security": [],
+        "parameters": [{ "name": "address", "in": "query", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MapsQuoteResponse" } } } }
+        }
+      }
+    },
+    "/maps/reverse": {
+      "get": {
+        "operationId": "mapsReverse",
+        "security": [],
+        "parameters": [
+          { "name": "lat", "in": "query", "required": true, "schema": { "type": "number" } },
+          { "name": "lng", "in": "query", "required": true, "schema": { "type": "number" } }
+        ],
+        "responses": {
+          "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MapsReverseResponse" } } } }
+        }
+      }
+    },
+    "/store": { "get": { "operationId": "getStore", "responses": { "200": { "description": "OK" }, "401": { "description": "Unauthorized" } } } },
+    "/catalog": { "get": { "operationId": "getCatalog", "responses": { "200": { "description": "OK" }, "401": { "description": "Unauthorized" } } } },
+    "/customers": {
+      "post": {
+        "operationId": "createCustomer",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CustomerCreate" } } } },
+        "responses": { "200": { "description": "OK" }, "400": { "description": "BadRequest" }, "401": { "description": "Unauthorized" } }
+      }
+    },
+    "/orders": {
+      "post": {
+        "operationId": "createOrder",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrderCreate" } } } },
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrderCreatedResponse" } } } } }
+      }
+    },
+    "/orders/{orderId}": {
+      "get": {
+        "operationId": "getOrderById",
+        "parameters": [{ "name": "orderId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK" }, "401": { "description": "Unauthorized" }, "404": { "description": "NotFound" } }
+      }
+    },
+    "/orders/{orderId}/status": {
+      "patch": {
+        "operationId": "patchOrderStatus",
+        "parameters": [{ "name": "orderId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrderStatusPatch" } } } },
+        "responses": { "200": { "description": "OK" }, "400": { "description": "BadRequest" }, "401": { "description": "Unauthorized" } }
+      }
+    },
+    "/checkout/whatsapp": {
+      "post": {
+        "operationId": "checkoutWhatsApp",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CheckoutRequest" } } } },
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CheckoutResponse" } } } } }
+      }
+    }
+  }
+}
 
-paths:
-  /store:
-    get:
-      summary: Consultar dados da pizzaria
-      operationId: getStore
-      responses:
-        "200":
-          description: Dados do estabelecimento
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Establishment"
-
-  /catalog:
-    get:
-      summary: Obter cardápio completo
-      operationId: getCatalog
-      responses:
-        "200":
-          description: Catálogo completo
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Catalog"
-
-  /orders:
-    post:
-      summary: Criar novo pedido
-      operationId: createOrder
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/CreateOrderRequest"
-      responses:
-        "201":
-          description: Pedido criado
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Order"
-
-  /orders/{orderId}:
-    get:
-      summary: Consultar pedido
-      operationId: getOrder
-      parameters:
-        - name: orderId
-          in: path
-          required: true
-          schema:
-            type: string
-          example: "7637462"
-      responses:
-        "200":
-          description: Pedido encontrado
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Order"
-        "401":
-          description: Token inválido no Cardápio Web
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "404":
-          description: Pedido não encontrado
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-
-  /orders/{orderId}/status:
-    patch:
-      summary: Atualizar status
-      operationId: updateOrderStatus
-      parameters:
-        - name: orderId
-          in: path
-          required: true
-          schema:
-            type: string
-          example: "7637462"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/UpdateOrderStatusRequest"
-      responses:
-        "200":
-          description: Status atualizado
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UpdateOrderStatusResponse"
-        "401":
-          description: Token inválido
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "501":
-          description: Status não implementado
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-
-  /customers:
-    post:
-      summary: Cadastrar cliente
-      operationId: createCustomer
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/CreateCustomerRequest"
-      responses:
-        "201":
-          description: Cliente cadastrado
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Customer"
-
-  /checkout/whatsapp:
-    post:
-      summary: Finalizar via WhatsApp
-      operationId: checkoutWhatsApp
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/CheckoutWhatsAppRequest"
-      responses:
-        "200":
-          description: Link para finalizar no WhatsApp
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/CheckoutWhatsAppResponse"
-
-components:
-  schemas:
-    # ======== SEUS SCHEMAS (Establishment etc.) ========
-
-    Establishment:
-      type: object
-      required:
-        - id
-        - name
-        - slug
-        - main_color
-        - status
-        - operation_modes
-        - created_at
-        - updated_at
-        - opening_hours
-        - payment_methods
-        - schedule_setting
-      properties:
-        id:
-          type: integer
-          example: 275
-        name:
-          type: string
-          example: "Teste Integração"
-        description:
-          type: [string, "null"]
-          example: "Sem dúvidas a melhor pizza de toda a região!"
-        slug:
-          type: string
-          example: "teste_integracao"
-        main_color:
-          type: string
-          pattern: "^#([A-Fa-f0-9]{6})$"
-          example: "#890000"
-        instagram:
-          type: [string, "null"]
-          example: "cardapio.web"
-        whatsapp:
-          type: [string, "null"]
-          pattern: "^[0-9]{10,15}$"
-          example: "5541996869828"
-        logo_image:
-          $ref: "#/components/schemas/Image"
-        banner_image:
-          $ref: "#/components/schemas/Image"
-        status:
-          type: string
-          enum: [ACTIVE, INACTIVE]
-          example: ACTIVE
-        operation_modes:
-          $ref: "#/components/schemas/OperationModes"
-        custom_domain:
-          type: [string, "null"]
-          example: null
-        created_at:
-          type: string
-          format: date-time
-          example: "2023-06-23T11:27:53.582-03:00"
-        updated_at:
-          type: string
-          format: date-time
-          example: "2023-06-27T11:24:39.404-03:00"
-        address:
-          $ref: "#/components/schemas/AddressNullable"
-        opening_hours:
-          $ref: "#/components/schemas/OpeningHours"
-        payment_methods:
-          type: array
-          items:
-            $ref: "#/components/schemas/EstablishmentPaymentMethod"
-        schedule_setting:
-          $ref: "#/components/schemas/ScheduleSetting"
-
-    Image:
-      type: object
-      required: [image_url, thumbnail_url]
-      properties:
-        image_url:
-          type: string
-          format: uri
-        thumbnail_url:
-          type: string
-          format: uri
-
-    OperationModes:
-      type: object
-      required: [delivery, takeout, immediate, scheduled]
-      properties:
-        delivery:
-          type: boolean
-          example: true
-        takeout:
-          type: boolean
-          example: true
-        immediate:
-          type: boolean
-          example: true
-        scheduled:
-          type: boolean
-          example: true
-
-    AddressNullable:
-      type: [object, "null"]
-      required: [street, neighborhood, city, state]
-      properties:
-        street:
-          type: string
-          example: "R. Júlio Azevedo"
-        number:
-          type: [string, "null"]
-          example: "1730"
-        address_block:
-          type: [string, "null"]
-          example: ""
-        address_lot:
-          type: [string, "null"]
-          example: ""
-        neighborhood:
-          type: string
-          example: "Cocó"
-        complement:
-          type: [string, "null"]
-          example: ""
-        reference:
-          type: [string, "null"]
-          example: null
-        postal_code:
-          type: [string, "null"]
-          example: "60192310"
-        city:
-          type: string
-          example: "Fortaleza"
-        state:
-          type: string
-          example: "CE"
-        latitude:
-          type: [string, "null"]
-          example: "-3.7448697"
-        longitude:
-          type: [string, "null"]
-          example: "-38.4836987"
-
-    OpeningHours:
-      type: object
-      required:
-        - sunday
-        - monday
-        - tuesday
-        - wednesday
-        - thursday
-        - friday
-        - saturday
-        - custom_dates
-        - temporary_state
-        - temporary_state_end_at
-        - timezone
-      properties:
-        sunday: { $ref: "#/components/schemas/TimeRanges" }
-        monday: { $ref: "#/components/schemas/TimeRanges" }
-        tuesday: { $ref: "#/components/schemas/TimeRanges" }
-        wednesday: { $ref: "#/components/schemas/TimeRanges" }
-        thursday: { $ref: "#/components/schemas/TimeRanges" }
-        friday: { $ref: "#/components/schemas/TimeRanges" }
-        saturday: { $ref: "#/components/schemas/TimeRanges" }
-        custom_dates:
-          type: object
-          additionalProperties:
-            $ref: "#/components/schemas/CustomDateConfig"
-          example:
-            "2023-07-15":
-              intervals: []
-              observation: "Férias coletivas!"
-        temporary_state:
-          type: [string, "null"]
-          enum: [open, closed, "null"]
-          example: "closed"
-        temporary_state_end_at:
-          type: [string, "null"]
-          format: date-time
-          example: "2023-06-27T11:55:35.000-03:00"
-        timezone:
-          type: string
-          example: "America/Sao_Paulo"
-
-    CustomDateConfig:
-      type: object
-      required: [intervals, observation]
-      properties:
-        intervals:
-          $ref: "#/components/schemas/TimeRanges"
-        observation:
-          type: [string, "null"]
-          example: ""
-
-    TimeRanges:
-      type: array
-      items:
-        $ref: "#/components/schemas/TimeRange"
-      description: "Se vazio, fechado."
-
-    TimeRange:
-      type: array
-      minItems: 2
-      maxItems: 2
-      items:
-        type: string
-        pattern: "^([01]\\d|2[0-3]):[0-5]\\d$"
-      example: ["10:00", "15:00"]
-
-    EstablishmentPaymentMethod:
-      type: object
-      required:
-        - payment_method
-        - percentual_fee
-        - fixed_fee
-        - observation
-        - active
-        - available_on_menu
-      properties:
-        payment_method:
-          type: string
-          enum:
-            - money
-            - credit_card
-            - debit_card
-            - pix
-            - pix_auto
-            - meal_voucher
-            - food_voucher
-            - bank_transfer
-            - bank_slip
-            - picpay
-            - debt_book
-            - online_credit_card
-            - ifood
-            - ifood_voucher
-            - food99
-            - food99_voucher
-          example: pix
-        percentual_fee:
-          type: [number, "null"]
-          example: null
-        fixed_fee:
-          type: [number, "null"]
-          example: null
-        observation:
-          oneOf:
-            - type: "null"
-            - type: string
-            - $ref: "#/components/schemas/PixEstablishmentObservation"
-        active:
-          type: boolean
-          example: true
-        available_on_menu:
-          type: boolean
-          example: true
-
-    PixEstablishmentObservation:
-      type: object
-      required: [type, key, name, observation]
-      properties:
-        type:
-          type: string
-          example: "CNPJ"
-        key:
-          type: string
-          example: "40.834.981/0001-97"
-        name:
-          type: string
-          example: "Cardápio Web"
-        observation:
-          type: [string, "null"]
-          example: "Enviar o comprovante pelo WhatsApp."
-
-    ScheduleSetting:
-      type: object
-      required:
-        - hours_in_advance_for_scheduling
-        - maximum_days_for_scheduling
-        - time_interval
-        - order_schedule_only_for_next_available_day
-        - block_schedule_for_the_same_day
-        - quantity_of_orders_per_interval
-        - available_hours
-      properties:
-        hours_in_advance_for_scheduling:
-          type: number
-          example: 1
-        maximum_days_for_scheduling:
-          type: integer
-          example: 15
-        time_interval:
-          type: integer
-          example: 30
-        order_schedule_only_for_next_available_day:
-          type: boolean
-          example: false
-        block_schedule_for_the_same_day:
-          type: boolean
-          example: false
-        quantity_of_orders_per_interval:
-          type: [integer, "null"]
-          example: null
-        available_hours:
-          $ref: "#/components/schemas/AvailableHours"
-
-    AvailableHours:
-      type: object
-      required:
-        - sunday
-        - monday
-        - tuesday
-        - wednesday
-        - thursday
-        - friday
-        - saturday
-        - custom_dates
-        - temporary_state
-        - temporary_state_end_at
-        - timezone
-      properties:
-        sunday: { $ref: "#/components/schemas/TimeRanges" }
-        monday: { $ref: "#/components/schemas/TimeRanges" }
-        tuesday: { $ref: "#/components/schemas/TimeRanges" }
-        wednesday: { $ref: "#/components/schemas/TimeRanges" }
-        thursday: { $ref: "#/components/schemas/TimeRanges" }
-        friday: { $ref: "#/components/schemas/TimeRanges" }
-        saturday: { $ref: "#/components/schemas/TimeRanges" }
-        custom_dates:
-          type: [object, "null"]
-          additionalProperties:
-            $ref: "#/components/schemas/CustomDateConfig"
-          example: null
-        temporary_state:
-          type: [string, "null"]
-          enum: [open, closed, "null"]
-          example: null
-        temporary_state_end_at:
-          type: [string, "null"]
-          format: date-time
-          example: null
-        timezone:
-          type: string
-          example: "America/Sao_Paulo"
-
-    # ======== SCHEMAS NOVOS (Orders, Catalog, Customer, etc.) ========
-
-    Catalog:
-      type: object
-      required: [categories]
-      properties:
-        categories:
-          type: array
-          items:
-            $ref: "#/components/schemas/CatalogCategory"
-
-    CatalogCategory:
-      type: object
-      required: [id, name, items]
-      properties:
-        id:
-          type: [string, integer]
-          example: "cat_pizzas"
-        name:
-          type: string
-          example: "🍕 Pizzas Salgadas"
-        items:
-          type: array
-          items:
-            $ref: "#/components/schemas/CatalogItem"
-
-    CatalogItem:
-      type: object
-      required: [id, name]
-      properties:
-        id:
-          type: [string, integer]
-          example: "2991"
-        name:
-          type: string
-          example: "Calabresa"
-        description:
-          type: [string, "null"]
-          example: "Clássica com cebola e azeitonas"
-        price:
-          type: [number, "null"]
-          example: 30.0
-
-    Customer:
-      type: object
-      required: [id, name, phone]
-      properties:
-        id:
-          type: string
-          example: "1700000000000"
-        name:
-          type: string
-          example: "Dony Momesso"
-        phone:
-          type: string
-          example: "5519999999999"
-
-    CreateCustomerRequest:
-      type: object
-      required: [name, phone]
-      properties:
-        name:
-          type: string
-        phone:
-          type: string
-
-    Order:
-      type: object
-      properties:
-        id:
-          type: [string, integer]
-          example: 7637462
-        display_id:
-          type: [integer, "null"]
-          example: 48
-        merchant_id:
-          type: [integer, "null"]
-          example: 1
-        status:
-          type: string
-          example: "confirmed"
-        order_type:
-          type: string
-          example: "takeout"
-        order_timing:
-          type: string
-          example: "immediate"
-        total:
-          type: [number, "null"]
-          example: 103.8
-        created_at:
-          type: [string, "null"]
-          format: date-time
-        updated_at:
-          type: [string, "null"]
-          format: date-time
-        customer:
-          type: [object, "null"]
-          properties:
-            id: { type: integer, example: 1574794 }
-            phone: { type: string, example: "5511999999999" }
-            name: { type: string, example: "Matheus Lessa" }
-
-    CreateOrderRequest:
-      type: object
-      description: "Payload livre (por enquanto) para criação de pedido na Pappi API."
-      properties:
-        customer:
-          type: object
-          properties:
-            name: { type: string }
-            phone: { type: string }
-        items:
-          type: array
-          items:
-            type: object
-            properties:
-              item_id: { type: string }
-              quantity: { type: number }
-
-    UpdateOrderStatusRequest:
-      type: object
-      required: [status]
-      properties:
-        status:
-          type: string
-          example: "ready"
-
-    UpdateOrderStatusResponse:
-      type: object
-      properties:
-        ok:
-          type: boolean
-          example: true
-        orderId:
-          type: string
-          example: "7637462"
-        status:
-          type: string
-          example: "ready"
-
-    CheckoutWhatsAppRequest:
-      type: object
-      required: [message]
-      properties:
-        message:
-          type: string
-          example: "Novo Pedido: Calabresa Grande"
-
-    CheckoutWhatsAppResponse:
-      type: object
-      properties:
-        ok:
-          type: boolean
-          example: true
-        url:
-          type: string
-          example: "https://wa.me/5519982275105?text=Novo%20Pedido%3A%20Calabresa"
-        text:
-          type: string
-          example: "Novo Pedido: Calabresa Grande"
-
-    ErrorResponse:
-      type: object
-      properties:
-        ok:
-          type: boolean
-          example: false
-        message:
-          type: string
-          example: "Token inválido."
-        payload:
-          type: [object, "null"]
 

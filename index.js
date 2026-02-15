@@ -770,6 +770,33 @@ app.get("/health", (req, res) => {
     time: nowIso(),
   });
 });
+app.get("/meta", (req, res) => {
+  res.status(200).json({
+    ok: true,
+    app: "API da Pappi Pizza",
+    version: "1.1.0",
+    env: {
+      hasWhatsapp: Boolean(WHATSAPP_TOKEN && WHATSAPP_PHONE_NUMBER_ID),
+      hasCardapioWeb: Boolean(CARDAPIOWEB_TOKEN),
+      hasGoogleMaps: Boolean(GOOGLE_MAPS_KEY),
+      hasStoreLatLng: Number.isFinite(STORE_LAT) && Number.isFinite(STORE_LNG),
+    },
+    store: {
+      id: "pappi_pizza",
+      name: "Pappi Pizza",
+      city: DEFAULT_CITY,
+      state: DEFAULT_STATE,
+      menu_url: "https://app.cardapioweb.com/pappi_pizza?s=dony",
+      whatsapp_human: HUMAN_WA_NUMBER
+    },
+    endpoints: {
+      public: ["/", "/health", "/meta", "/debug-auth", "/maps/quote", "/maps/reverse"],
+      internal: ["/store", "/catalog", "/customers", "/orders", "/orders/{orderId}", "/orders/{orderId}/status", "/checkout/whatsapp"],
+      webhooks: ["/webhook", "/cardapioweb/webhook"]
+    },
+    time: nowIso()
+  });
+});
 
 app.get("/debug-auth", (req, res) => {
   res.status(200).json({

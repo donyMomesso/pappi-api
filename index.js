@@ -1,4 +1,4 @@
-const { createApp } = require("./SCR/app");
+const { createApp } = require("./src/app");
 
 const PORT = process.env.PORT || 10000;
 

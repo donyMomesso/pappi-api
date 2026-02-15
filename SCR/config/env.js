@@ -1,5 +1,8 @@
-require("dotenv").config();
-
+// No Render, ENV já vem pronta. Dotenv só é útil localmente.
+// Se quiser manter local, use assim:
+if (process.env.NODE_ENV !== "production") {
+  require("dotenv").config();
+}
 const ENV = {
   PORT: process.env.PORT || 10000,
   ATTENDANT_API_KEY: process.env.ATTENDANT_API_KEY || "",

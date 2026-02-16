@@ -1,17 +1,14 @@
 const express = require("express");
 const ENV = require("../config/env");
 const { PrismaClient } = require("@prisma/client");
-const { OpenAI } = require("openai");
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 const router = express.Router();
 const prisma = new PrismaClient();
 
-// A GRANDE MÁGICA AQUI: 
-// Usamos a biblioteca da OpenAI, mas apontamos para os servidores GRATUITOS do Google Gemini!
-const openai = new OpenAI({
-    apiKey: process.env.GEMINI_API_KEY, 
-    baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/"
-});
+// Inicializa a IA do Google
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
 // ===============================
 // 1. HELPERS E WHATSAPP ENGINE
@@ -137,26 +134,23 @@ ${menuText}
 
                     // 4. MEMÓRIA DE CURTO PRAZO
                     if (!chatHistory.has(from)) {
-                        chatHistory.set(from, [{ role: "system", content: PROMPT_NEUROCIENCIA }]);
+                        // O Gemini lida com o "system prompt" de uma forma diferente, enviaremos tudo junto por enquanto
+                        chatHistory.set(from, []);
                     }
                     const history = chatHistory.get(from);
+
+                    // Formata a mensagem para o Gemini (enviando o contexto e a mensagem do usuário)
+                    const fullMessage = `${PROMPT_NEUROCIENCIA}\n\nO cliente disse: ${text}`;
                     
-                    history.push({ role: "user", content: text });
+                    // 5. CHAMA O GOOGLE GEMINI
+                    const result = await model.generateContent(fullMessage);
+                    const respostaBot = result.response.text();
 
-                    // 5. CHAMA O GOOGLE GEMINI (De forma gratuita!)
-                    const aiResponse = await openai.chat.completions.create({
-                        model: "gemini-1.5-flash", // Modelo gratuito super inteligente e rápido do Google
-                        messages: history,
-                        temperature: 0.7,
-                        max_tokens: 300
-                    });
-
-                    const respostaBot = aiResponse.choices[0].message.content;
-
-                    history.push({ role: "assistant", content: respostaBot });
+                    history.push({ role: "user", parts: [{ text: text }] });
+                    history.push({ role: "model", parts: [{ text: respostaBot }] });
                     
                     if (history.length > 15) {
-                        chatHistory.set(from, [history[0], ...history.slice(-14)]);
+                        chatHistory.set(from, history.slice(-14));
                     }
 
                     // 6. ENVIA PARA O WHATSAPP

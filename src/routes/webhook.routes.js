@@ -1,4 +1,9 @@
-router.get("/_debug_webhook", (req, res) => {
+const express = require("express");
+const ENV = require("../config/env");
+
+const router = express.Router();
+
+router.get("/_debug_webhook2", (req, res) => {
   res.json({
     mode: req.query["hub.mode"],
     token: req.query["hub.verify_token"],
@@ -7,3 +12,5 @@ router.get("/_debug_webhook", (req, res) => {
     expectedLen: (ENV.WEBHOOK_VERIFY_TOKEN || "").length,
   });
 });
+
+module.exports = router;

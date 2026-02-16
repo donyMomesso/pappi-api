@@ -6,9 +6,11 @@ const { GoogleGenerativeAI } = require("@google/generative-ai");
 const router = express.Router();
 const prisma = new PrismaClient();
 
-// Inicializa a IA do Google com o modelo correto e atualizado
+// Inicializa a IA do Google
 const apiKey = process.env.GEMINI_API_KEY || "";
 const genAI = new GoogleGenerativeAI(apiKey);
+
+// Mudamos para "gemini-pro" que é o modelo mais universal e garantido
 const model = genAI.getGenerativeModel({ model: "gemini-pro" });
 
 // ===============================
@@ -64,10 +66,22 @@ async function getCatalogText() {
 const chatHistory = new Map();
 
 // ===============================
-// 4. ROTAS DO WEBHOOK
+// 4. ROTAS DO WEBHOOK E DEBUG
 // ===============================
 router.get("/", (req, res) => res.send("Pappi API IA online 🧠✅"));
 router.get("/health", (req, res) => res.json({ ok: true, app: "Pappi Pizza IA" }));
+
+// A ROTA SECRETA QUE VOCÊ SUGERIU PARA DESCOBRIRMOS OS MODELOS!
+router.get("/modelos-disponiveis", async (req, res) => {
+    try {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${process.env.GEMINI_API_KEY}`;
+        const response = await fetch(url);
+        const data = await response.json();
+        res.json(data);
+    } catch (error) {
+        res.status(500).json({ erro: error.message });
+    }
+});
 
 router.get("/webhook", (req, res) => {
     if (req.query["hub.mode"] === "subscribe" && req.query["hub.verify_token"] === ENV.WEBHOOK_VERIFY_TOKEN) {

@@ -11,7 +11,7 @@ const apiKey = process.env.GEMINI_API_KEY || "";
 const genAI = new GoogleGenerativeAI(apiKey);
 
 // Mudamos para "gemini-pro" que é o modelo mais universal e garantido
-const model = genAI.getGenerativeModel({ model: "gemini-pro" });
+const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
 // ===============================
 // 1. HELPERS E WHATSAPP ENGINE

@@ -7,7 +7,7 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// Tabela de Clientes para a IA lembrar
+// Tabela de Clientes (Mantida conforme seu código)
 model Customer {
   id              String   @id @default(uuid())
   phone           String   @unique
@@ -15,4 +15,21 @@ model Customer {
   lastAddress     String?  
   lastInteraction DateTime @default(now())
   createdAt       DateTime @default(now())
+}
+
+// NOVA: Tabela para o PIX e Regras Gerais da Pappi Pizza
+model Config {
+  id    Int    @id @default(1)
+  key   String @unique // Ex: "CHAVE_PIX", "TAXA_ENTREGA", "REGRAS"
+  value String
+}
+
+// NOVA: Tabela de Sabores (Para a IA nunca errar o preço)
+model Sabores {
+  id           Int     @id @default(autoincrement())
+  nome         String  @unique
+  ingredientes String?
+  preco        Float
+  disponivel   Boolean @default(true)
+  isPromo      Boolean @default(false)
 }

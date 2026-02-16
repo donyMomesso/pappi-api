@@ -5,18 +5,25 @@ const apiKey = process.env.GEMINI_API_KEY || "";
 const genAI = new GoogleGenerativeAI(apiKey);
 const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" });
 
-async function chatCompletion(systemPrompt, history, userMessage) {
+async function chatCompletion(messagesArray) {
     try {
-        if (!apiKey) throw new Error("Chave GEMINI_API_KEY ausente.");
+        if (!apiKey) throw new Error("Chave GEMINI_API_KEY ausente no Render.");
 
-        // Monta o script juntando a personalidade, o histórico e a mensagem atual
-        const fullPrompt = `${systemPrompt}\n\n--- HISTÓRICO ---\n${history.join("\n")}\n\nCliente: ${userMessage}\nAtendente Pappi Pizza:`;
+        // Traduz o formato de mensagens para um roteiro que o Gemini entende perfeitamente
+        let fullPrompt = "";
+        messagesArray.forEach(msg => {
+            if (msg.role === "system") fullPrompt += `Instruções: ${msg.content}\n\n---\n\n`;
+            if (msg.role === "user") fullPrompt += `Cliente: ${msg.content}\n`;
+            if (msg.role === "assistant") fullPrompt += `Atendente: ${msg.content}\n`;
+        });
+        
+        fullPrompt += "Atendente:";
 
         const result = await model.generateContent(fullPrompt);
         return result.response.text();
     } catch (error) {
-        console.error("🔥 Erro no Serviço de IA:", error);
-        throw error; // Repassa o erro para quem chamou a função tratar
+        console.error("🔥 Erro no Serviço de IA (Gemini):", error);
+        throw error;
     }
 }
 

@@ -6,11 +6,11 @@ const { GoogleGenerativeAI } = require("@google/generative-ai");
 const router = express.Router();
 const prisma = new PrismaClient();
 
-// Inicializa a IA do Google
+// Inicializa a IA do Google com o modelo que sua conta liberou no gratuito
 const apiKey = process.env.GEMINI_API_KEY || "";
 const genAI = new GoogleGenerativeAI(apiKey);
 
-// Mudamos para "gemini-pro" que é o modelo mais universal e garantido
+// Ajustado para o modelo estável e gratuito da sua lista
 const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
 // ===============================
@@ -69,9 +69,8 @@ const chatHistory = new Map();
 // 4. ROTAS DO WEBHOOK E DEBUG
 // ===============================
 router.get("/", (req, res) => res.send("Pappi API IA online 🧠✅"));
-router.get("/health", (req, res) => res.json({ ok: true, app: "Pappi Pizza IA" }));
 
-// A ROTA SECRETA QUE VOCÊ SUGERIU PARA DESCOBRIRMOS OS MODELOS!
+// Rota para conferir modelos se precisar futuramente
 router.get("/modelos-disponiveis", async (req, res) => {
     try {
         const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${process.env.GEMINI_API_KEY}`;
@@ -106,12 +105,9 @@ router.post("/webhook", async (req, res) => {
                 if (!text) continue; 
 
                 try {
-                    // Proteção caso falte a chave
-                    if (!apiKey) throw new Error("Chave GEMINI_API_KEY não encontrada no Render.");
+                    if (!apiKey) throw new Error("Chave GEMINI_API_KEY faltando.");
 
-                    // 1. MEMÓRIA DE LONGO PRAZO (Prisma / PostgreSQL)
                     let customer = await prisma.customer.findUnique({ where: { phone: from } });
-                    
                     const now = new Date();
                     let isReturningCustomer = false;
 
@@ -120,63 +116,42 @@ router.post("/webhook", async (req, res) => {
                     } else {
                         const hoursSinceLast = (now - new Date(customer.lastInteraction)) / (1000 * 60 * 60);
                         if (hoursSinceLast > 2) isReturningCustomer = true;
-                        
                         await prisma.customer.update({ where: { phone: from }, data: { lastInteraction: now } });
                     }
 
-                    // 2. RECUPERA CARDÁPIO
                     const menuText = await getCatalogText();
 
-                    // 3. PREPARA O CÉREBRO DA IA (Prompt de Neurociência)
                     const PROMPT_NEUROCIENCIA = `
-Você é o atendente virtual humanizado da Pappi Pizza (Campinas-SP).
-Seu tom é caloroso, simpático, com energia e usa emojis moderadamente.
-Use gatilhos mentais de vendas (escassez, prova social, reciprocidade) de forma sutil e natural.
+Você é o atendente virtual da Pappi Pizza (Campinas-SP).
+Seu tom é amigável e focado em vendas.
+CLIENTE: ${customer.phone} | NOME: ${customer.name || "Desconhecido"} | RETORNANDO: ${isReturningCustomer ? "Sim" : "Não"}
 
-INFORMAÇÕES DO CLIENTE:
-- Telefone: ${customer.phone}
-- Nome no banco de dados: ${customer.name ? customer.name : "Desconhecido"}
-- É um cliente retornando após algumas horas/dias? ${isReturningCustomer ? "Sim" : "Não"}
+REGRAS:
+1. Se não souber o nome, pergunte.
+2. Se souber, use o nome.
+3. Use o cardápio abaixo para tirar dúvidas e anotar pedidos.
+4. Peça endereço completo (Rua, Número, Bairro) antes de fechar.
 
-REGRAS DE OURO:
-1. Se o nome for "Desconhecido", na sua PRIMEIRA resposta, seja simpático e pergunte o nome dele para anotar.
-2. Se você já sabe o nome, chame-o pelo nome! Se ele estiver retornando, diga "Que bom te ver de novo, [Nome]!".
-3. Você tem acesso ao cardápio abaixo. Sugira a "Pizza Margherita" ou o "Combo da promoção" dizendo que "estão saindo muito hoje" (prova social).
-4. ENDEREÇO: Clientes mandam o endereço quebrado em várias linhas. Se ele mandar só a rua, não encerre o pedido. Diga: "Anotado! Qual é o número e o bairro para eu calcular a entrega certinho?". Só prossiga quando tiver Rua, Número e Bairro.
-5. Se for pizza, pergunte o tamanho: Brotinho (4), Grande (8) ou Gigante (16). Se for combo, não pergunte tamanho.
-6. Quando o pedido estiver completo (Itens, Tamanhos e Endereço), faça um resumo bonito do pedido e diga que ele pode confirmar para enviarmos para a cozinha.
-7. Responda APENAS como o Atendente. NUNCA gere a fala do cliente.
-
-CARDÁPIO ATUAL:
+CARDÁPIO:
 ${menuText}
 `;
 
-                    // 4. MEMÓRIA DE CURTO PRAZO BLINDADA
-                    if (!chatHistory.has(from)) {
-                        chatHistory.set(from, []);
-                    }
+                    if (!chatHistory.has(from)) chatHistory.set(from, []);
                     const history = chatHistory.get(from);
-                    
                     history.push(`Cliente: ${text}`);
+                    if (history.length > 10) history.shift();
 
-                    if (history.length > 10) {
-                        history.splice(0, history.length - 10);
-                    }
+                    const fullPrompt = `${PROMPT_NEUROCIENCIA}\n\nHistórico:\n${history.join("\n")}\n\nAtendente:`;
 
-                    const fullPrompt = `${PROMPT_NEUROCIENCIA}\n\n--- HISTÓRICO DA CONVERSA ---\n${history.join("\n")}\n\nAtendente Pappi Pizza:`;
-
-                    // 5. CHAMA O GOOGLE GEMINI
                     const result = await model.generateContent(fullPrompt);
                     const respostaBot = result.response.text();
 
-                    history.push(`Atendente Pappi Pizza: ${respostaBot}`);
-
-                    // 6. ENVIA PARA O WHATSAPP
+                    history.push(`Atendente: ${respostaBot}`);
                     await sendText(from, respostaBot);
 
                 } catch (error) {
-                    console.error("🔥 Erro na IA/Banco:", error);
-                    await sendText(from, "Puxa, nossa cozinha está a todo vapor e meu sistema deu uma leve travada. Pode repetir sua última mensagem, por favor? 🍕\n\nSe preferir não esperar, você mesmo pode fazer e finalizar seu pedido rapidinho pelo nosso cardápio digital acessando o link abaixo:\n🔗 https://app.cardapioweb.com/pappi_pizza?s=dony");
+                    console.error("🔥 Erro:", error);
+                    await sendText(from, "Puxa, deu um erro técnico aqui. Pode repetir? 🍕");
                 }
             }
         }

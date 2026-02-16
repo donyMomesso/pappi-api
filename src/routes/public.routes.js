@@ -1,3 +1,10 @@
+router.get("/_debug_webhook", (req, res) => {
+  res.json({
+    mode: req.query["hub.mode"],
+    token: req.query["hub.verify_token"],
+    challenge: req.query["hub.challenge"],
+  });
+});
 const express = require("express");
 const ENV = require("../config/env");
 

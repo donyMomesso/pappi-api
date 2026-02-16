@@ -164,7 +164,7 @@ ${menuText}
 
                 } catch (error) {
                     console.error("🔥 Erro na IA/Banco:", error);
-                    await sendText(from, "Puxa, nossa cozinha está a todo vapor e meu sistema deu uma leve travada. Pode repetir sua última mensagem, por favor? 🍕");
+                    await sendText(from, "Puxa, nossa cozinha está a todo vapor e meu sistema deu uma leve travada. Pode repetir sua última mensagem, por favor? 🍕\n\nSe preferir não esperar, você mesmo pode fazer e finalizar seu pedido rapidinho pelo nosso cardápio digital acessando o link abaixo:\n🔗 https://app.cardapioweb.com/pappi_pizza?s=dony");
                 }
             }
         }

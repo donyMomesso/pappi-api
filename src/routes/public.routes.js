@@ -6,8 +6,12 @@ const { OpenAI } = require("openai");
 const router = express.Router();
 const prisma = new PrismaClient();
 
-// Inicia a OpenAI (Ele vai ler a variável OPENAI_API_KEY automaticamente do Render)
-const openai = new OpenAI();
+// A GRANDE MÁGICA AQUI: 
+// Usamos a biblioteca da OpenAI, mas apontamos para os servidores GRATUITOS do Google Gemini!
+const openai = new OpenAI({
+    apiKey: process.env.GEMINI_API_KEY, 
+    baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/"
+});
 
 // ===============================
 // 1. HELPERS E WHATSAPP ENGINE
@@ -39,7 +43,6 @@ async function getCatalogText() {
         
         if (!data.categories) return "Cardápio indisponível no momento.";
         
-        // Transforma o JSON num texto fácil para a IA ler
         let menuText = "CARDÁPIO PAPPI PIZZA:\n";
         data.categories.forEach(cat => {
             if(cat.status === "ACTIVE") {
@@ -88,7 +91,7 @@ router.post("/webhook", async (req, res) => {
             for (const msg of value.messages) {
                 const from = msg.from;
                 const text = msg.text?.body || "";
-                if (!text) continue; // Por enquanto, a IA só lê texto
+                if (!text) continue; 
 
                 try {
                     // 1. MEMÓRIA DE LONGO PRAZO (Prisma / PostgreSQL)
@@ -98,14 +101,11 @@ router.post("/webhook", async (req, res) => {
                     let isReturningCustomer = false;
 
                     if (!customer) {
-                        // Cliente Novo
                         customer = await prisma.customer.create({ data: { phone: from } });
                     } else {
-                        // Verifica se faz mais de 2 horas desde a última mensagem (abandono ou retorno)
                         const hoursSinceLast = (now - new Date(customer.lastInteraction)) / (1000 * 60 * 60);
                         if (hoursSinceLast > 2) isReturningCustomer = true;
                         
-                        // Atualiza a data do último contato
                         await prisma.customer.update({ where: { phone: from }, data: { lastInteraction: now } });
                     }
 
@@ -135,18 +135,17 @@ CARDÁPIO ATUAL:
 ${menuText}
 `;
 
-                    // 4. MEMÓRIA DE CURTO PRAZO (Contexto da conversa atual)
+                    // 4. MEMÓRIA DE CURTO PRAZO
                     if (!chatHistory.has(from)) {
                         chatHistory.set(from, [{ role: "system", content: PROMPT_NEUROCIENCIA }]);
                     }
                     const history = chatHistory.get(from);
                     
-                    // Adiciona a mensagem nova do cliente no histórico
                     history.push({ role: "user", content: text });
 
-                    // 5. CHAMA A OPENAI (CHATGPT)
+                    // 5. CHAMA O GOOGLE GEMINI (De forma gratuita!)
                     const aiResponse = await openai.chat.completions.create({
-                        model: "gpt-4o-mini", // Modelo super rápido e barato
+                        model: "gemini-1.5-flash", // Modelo gratuito super inteligente e rápido do Google
                         messages: history,
                         temperature: 0.7,
                         max_tokens: 300
@@ -154,15 +153,13 @@ ${menuText}
 
                     const respostaBot = aiResponse.choices[0].message.content;
 
-                    // Salva a resposta do bot no histórico para ele não perder o fio da meada
                     history.push({ role: "assistant", content: respostaBot });
                     
-                    // Limita o histórico para não gastar muita memória/tokens (guarda as últimas 15 mensagens)
                     if (history.length > 15) {
                         chatHistory.set(from, [history[0], ...history.slice(-14)]);
                     }
 
-                    // 6. ENVIA A MENSAGEM PARA O WHATSAPP
+                    // 6. ENVIA PARA O WHATSAPP
                     await sendText(from, respostaBot);
 
                 } catch (error) {

@@ -116,3 +116,57 @@ router.post("/webhook", async (req, res) => {
                     // 3. PREPARA O CÉREBRO DA IA (Prompt de Neurociência)
                     const PROMPT_NEUROCIENCIA = `
 Você é o atendente virtual humanizado da Pappi Pizza (Campinas-SP).
+Seu tom é caloroso, simpático, com energia e usa emojis moderadamente.
+Use gatilhos mentais de vendas (escassez, prova social, reciprocidade) de forma sutil e natural.
+
+INFORMAÇÕES DO CLIENTE:
+- Telefone: ${customer.phone}
+- Nome no banco de dados: ${customer.name ? customer.name : "Desconhecido"}
+- É um cliente retornando após algumas horas/dias? ${isReturningCustomer ? "Sim" : "Não"}
+
+REGRAS DE OURO:
+1. Se o nome for "Desconhecido", na sua PRIMEIRA resposta, seja simpático e pergunte o nome dele para anotar.
+2. Se você já sabe o nome, chame-o pelo nome! Se ele estiver retornando, diga "Que bom te ver de novo, [Nome]!".
+3. Você tem acesso ao cardápio abaixo. Sugira a "Pizza Margherita" ou o "Combo da promoção" dizendo que "estão saindo muito hoje" (prova social).
+4. ENDEREÇO: Clientes mandam o endereço quebrado em várias linhas. Se ele mandar só a rua, não encerre o pedido. Diga: "Anotado! Qual é o número e o bairro para eu calcular a entrega certinho?". Só prossiga quando tiver Rua, Número e Bairro.
+5. Se for pizza, pergunte o tamanho: Brotinho (4), Grande (8) ou Gigante (16). Se for combo, não pergunte tamanho.
+6. Quando o pedido estiver completo (Itens, Tamanhos e Endereço), faça um resumo bonito do pedido e diga que ele pode confirmar para enviarmos para a cozinha.
+7. Responda APENAS como o Atendente. NUNCA gere a fala do cliente.
+
+CARDÁPIO ATUAL:
+${menuText}
+`;
+
+                    // 4. MEMÓRIA DE CURTO PRAZO BLINDADA
+                    if (!chatHistory.has(from)) {
+                        chatHistory.set(from, []);
+                    }
+                    const history = chatHistory.get(from);
+                    
+                    history.push(`Cliente: ${text}`);
+
+                    if (history.length > 10) {
+                        history.splice(0, history.length - 10);
+                    }
+
+                    const fullPrompt = `${PROMPT_NEUROCIENCIA}\n\n--- HISTÓRICO DA CONVERSA ---\n${history.join("\n")}\n\nAtendente Pappi Pizza:`;
+
+                    // 5. CHAMA O GOOGLE GEMINI
+                    const result = await model.generateContent(fullPrompt);
+                    const respostaBot = result.response.text();
+
+                    history.push(`Atendente Pappi Pizza: ${respostaBot}`);
+
+                    // 6. ENVIA PARA O WHATSAPP
+                    await sendText(from, respostaBot);
+
+                } catch (error) {
+                    console.error("🔥 Erro na IA/Banco:", error);
+                    await sendText(from, "Puxa, nossa cozinha está a todo vapor e meu sistema deu uma leve travada. Pode repetir sua última mensagem, por favor? 🍕\n\nSe preferir não esperar, você mesmo pode fazer e finalizar seu pedido rapidinho pelo nosso cardápio digital acessando o link abaixo:\n🔗 https://app.cardapioweb.com/pappi_pizza?s=dony");
+                }
+            }
+        }
+    }
+});
+
+module.exports = router;

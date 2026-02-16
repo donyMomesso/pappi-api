@@ -6,9 +6,10 @@ const { GoogleGenerativeAI } = require("@google/generative-ai");
 const router = express.Router();
 const prisma = new PrismaClient();
 
-// Inicializa a IA do Google
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+// Inicializa a IA do Google com o modelo correto e atualizado
+const apiKey = process.env.GEMINI_API_KEY || "";
+const genAI = new GoogleGenerativeAI(apiKey);
+const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" });
 
 // ===============================
 // 1. HELPERS E WHATSAPP ENGINE
@@ -91,6 +92,9 @@ router.post("/webhook", async (req, res) => {
                 if (!text) continue; 
 
                 try {
+                    // Proteção caso falte a chave
+                    if (!apiKey) throw new Error("Chave GEMINI_API_KEY não encontrada no Render.");
+
                     // 1. MEMÓRIA DE LONGO PRAZO (Prisma / PostgreSQL)
                     let customer = await prisma.customer.findUnique({ where: { phone: from } });
                     
@@ -112,57 +116,3 @@ router.post("/webhook", async (req, res) => {
                     // 3. PREPARA O CÉREBRO DA IA (Prompt de Neurociência)
                     const PROMPT_NEUROCIENCIA = `
 Você é o atendente virtual humanizado da Pappi Pizza (Campinas-SP).
-Seu tom é caloroso, simpático, com energia e usa emojis moderadamente.
-Use gatilhos mentais de vendas (escassez, prova social, reciprocidade) de forma sutil e natural.
-
-INFORMAÇÕES DO CLIENTE:
-- Telefone: ${customer.phone}
-- Nome no banco de dados: ${customer.name ? customer.name : "Desconhecido"}
-- É um cliente retornando após algumas horas/dias? ${isReturningCustomer ? "Sim" : "Não"}
-
-REGRAS DE OURO:
-1. Se o nome for "Desconhecido", na sua PRIMEIRA resposta, seja simpático e pergunte o nome dele para anotar.
-2. Se você já sabe o nome, chame-o pelo nome! Se ele estiver retornando, diga "Que bom te ver de novo, [Nome]!".
-3. Você tem acesso ao cardápio abaixo. Sugira a "Pizza Margherita" ou o "Combo da promoção" dizendo que "estão saindo muito hoje" (prova social).
-4. ENDEREÇO: Clientes mandam o endereço quebrado em várias linhas. Se ele mandar só a rua, não encerre o pedido. Diga: "Anotado! Qual é o número e o bairro para eu calcular a entrega certinho?". Só prossiga quando tiver Rua, Número e Bairro.
-5. Se for pizza, pergunte o tamanho: Brotinho (4), Grande (8) ou Gigante (16). Se for combo, não pergunte tamanho.
-6. Quando o pedido estiver completo (Itens, Tamanhos e Endereço), faça um resumo bonito do pedido e diga que ele pode confirmar para enviarmos para a cozinha.
-
-CARDÁPIO ATUAL:
-${menuText}
-`;
-
-                    // 4. MEMÓRIA DE CURTO PRAZO
-                    if (!chatHistory.has(from)) {
-                        // O Gemini lida com o "system prompt" de uma forma diferente, enviaremos tudo junto por enquanto
-                        chatHistory.set(from, []);
-                    }
-                    const history = chatHistory.get(from);
-
-                    // Formata a mensagem para o Gemini (enviando o contexto e a mensagem do usuário)
-                    const fullMessage = `${PROMPT_NEUROCIENCIA}\n\nO cliente disse: ${text}`;
-                    
-                    // 5. CHAMA O GOOGLE GEMINI
-                    const result = await model.generateContent(fullMessage);
-                    const respostaBot = result.response.text();
-
-                    history.push({ role: "user", parts: [{ text: text }] });
-                    history.push({ role: "model", parts: [{ text: respostaBot }] });
-                    
-                    if (history.length > 15) {
-                        chatHistory.set(from, history.slice(-14));
-                    }
-
-                    // 6. ENVIA PARA O WHATSAPP
-                    await sendText(from, respostaBot);
-
-                } catch (error) {
-                    console.error("🔥 Erro na IA/Banco:", error);
-                    await sendText(from, "Puxa, nossa cozinha está a todo vapor e meu sistema deu uma leve travada. Pode repetir sua última mensagem, por favor? 🍕\n\nSe preferir não esperar, você mesmo pode fazer e finalizar seu pedido rapidinho pelo nosso cardápio digital acessando o link abaixo:\n🔗 https://app.cardapioweb.com/pappi_pizza?s=dony");
-                }
-            }
-        }
-    }
-});
-
-module.exports = router;

@@ -1,22 +1,25 @@
 const express = require("express");
-const { chatCompletion } = require("../services/ai.service.js");
+const { chatCompletion } = require("../services/ai.service");
 
 const router = express.Router();
 
 router.post("/chat", async (req, res) => {
   try {
-    const { message } = req.body || {};
+    const { message, messages } = req.body || {};
 
-    if (!message) {
-      return res.status(400).json({ error: "Envie a 'message' no corpo da requisição." });
+    // Aceita "message" simples ou um array "messages"
+    const finalMessages = Array.isArray(messages)
+      ? messages
+      : [
+          { role: "system", content: "Você é um atendente da Pappi Pizza. Seja objetivo e cordial." },
+          { role: "user", content: String(message || "") },
+        ];
+
+    if (!finalMessages.length) {
+      return res.status(400).json({ error: "Envie 'message' ou 'messages'." });
     }
 
-    // Define a personalidade e passa um histórico vazio para esse teste isolado
-    const systemPrompt = "Você é um atendente da Pappi Pizza. Seja objetivo e cordial.";
-    const history = []; 
-
-    // Chama o nosso serviço isolado
-    const answer = await chatCompletion(systemPrompt, history, message);
+    const answer = await chatCompletion(finalMessages);
 
     return res.json({ answer });
   } catch (err) {

@@ -1,0 +1,18 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Tabela de Clientes para a IA lembrar
+model Customer {
+  id              String   @id @default(uuid())
+  phone           String   @unique
+  name            String?  
+  lastAddress     String?  
+  lastInteraction DateTime @default(now())
+  createdAt       DateTime @default(now())
+}

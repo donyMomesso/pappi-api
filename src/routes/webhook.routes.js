@@ -3,7 +3,7 @@ const ENV = require("../config/env");
 
 const router = express.Router();
 
-router.get("/_debug_webhook2", (req, res) => {
+router.get("/_debug_webhook", (req, res) => {
   res.json({
     mode: req.query["hub.mode"],
     token: req.query["hub.verify_token"],

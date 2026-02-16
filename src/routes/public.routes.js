@@ -3,23 +3,12 @@ const ENV = require("../config/env");
 
 const router = express.Router();
 
-// Agora sim você pode usar o router
-router.get("/_debug_webhook", (req, res) => {
-  res.json({
-    mode: req.query["hub.mode"],
-    token: req.query["hub.verify_token"],
-    challenge: req.query["hub.challenge"],
-  });
-});
-
 // ===============================
 // Helpers
 // ===============================
 function digitsOnly(s) {
   return String(s || "").replace(/\D/g, "");
 }
-
-// ... (MANTENHA O RESTO DO ARQUIVO IGUAL A PARTIR DAQUI) ...
 
 function extractIncomingMessages(body) {
   const out = [];

@@ -8,3 +8,4 @@ Cliente recorrente.
 - Não pedir nome novamente.
 - Atendimento mais direto.
 - Oferecer upgrade ou combo.
+- Priorize rapidez: conduzir para confirmação.

@@ -7,6 +7,29 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+model Customer {
+  id              String   @id @default(uuid())
+  phone           String   @unique
+  name            String?  
+  lastAddress     String?  
+  lastInteraction DateTime @default(now())
+}
+
+model Config {
+  id    Int    @id @default(1)
+  key   String @unique
+  value String
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
 // Tabela de Clientes (Mantida conforme seu código)
 model Customer {
   id              String   @id @default(uuid())

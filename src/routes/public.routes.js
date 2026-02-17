@@ -1,3 +1,4 @@
+const { loadRules } = require("../rules/loader");
 const express = require("express");
 const ENV = require("../config/env");
 const { PrismaClient } = require("@prisma/client");

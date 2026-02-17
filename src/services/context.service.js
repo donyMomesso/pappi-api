@@ -1,17 +1,13 @@
-function getContextMode(customer, now = new Date()) {
-  const day = now.getDay(); // 0 = domingo
+function getMode({ customer, now = new Date() }) {
+  const day = now.getDay(); // 0 dom, 5 sex, 6 sab
+  const isEvent = day === 5 || day === 6;
 
-  const isWeekend = day === 5 || day === 6; // sexta ou sábado
+  const total = Number(customer?.totalOrders || 0);
+  const isVip = total >= 3; // ajuste como quiser
 
-  if (customer?.totalOrders >= 3) {
-    return "VIP";
-  }
-
-  if (isWeekend) {
-    return "EVENT";
-  }
-
+  if (isVip) return "VIP";
+  if (isEvent) return "EVENT";
   return "BASE";
 }
 
-module.exports = { getContextMode };
+module.exports = { getMode };

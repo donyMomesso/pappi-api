@@ -1,3 +1,6 @@
+const { getMode } = require("../services/context.service");
+const { loadRules } = require("../services/rulesdb.service");
+const { getUpsellHint } = require("../services/upsell.service");
 const { getContextMode } = require("../services/context.service");
 const mode = getContextMode(customer);
 const RULES = loadRules(mode);

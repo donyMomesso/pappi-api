@@ -6,7 +6,7 @@ const { GoogleGenerativeAI } = require("@google/generative-ai");
 const router = express.Router();
 const prisma = new PrismaClient();
 
-// Inicializa a IA com o modelo gratuito confirmado na sua lista
+// Inicializa a IA com o modelo gratuito confirmado
 const apiKey = process.env.GEMINI_API_KEY || "";
 const genAI = new GoogleGenerativeAI(apiKey);
 const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
@@ -31,11 +31,10 @@ async function sendText(to, text) {
 }
 
 // ===============================
-// 2. BUSCA DO CARDÁPIO WEB (URL SANDBOX ATUALIZADA)
+// 2. BUSCA DO CARDÁPIO WEB (URL SANDBOX)
 // ===============================
 async function getCatalogText() {
-    // URL de integração Sandbox fornecida
-    const url = `https://integracao.sandbox.cardapioweb.com/api/partner/v1/catalog`;
+    const url = "https://integracao.sandbox.cardapioweb.com/api/partner/v1/catalog";
     
     try {
         const resp = await fetch(url, { 
@@ -54,7 +53,6 @@ async function getCatalogText() {
             if(cat.status === "ACTIVE") {
                 menuText += `\n🍕 *${cat.name.toUpperCase()}*\n`;
                 cat.items.forEach(item => {
-                    // Itens precisam estar ativos e ter preço
                     if(item.status === "ACTIVE") {
                         menuText += `- ${item.name}: R$ ${item.price.toFixed(2)} - ${item.description || ""}\n`;
                     }
@@ -96,14 +94,14 @@ router.post("/webhook", async (req, res) => {
     if (!text) return;
 
     try {
-        // 1. BUSCA O PIX NO BANCO (Regras de Inter e Titularidade)
+        // 1. BUSCA O PIX NO BANCO
         const configPix = await prisma.config.findUnique({ where: { key: "CHAVE_PIX" } });
         const pixTexto = configPix ? configPix.value : "PIX: 19 9 8319 3999 (Celular)\nTitular: Darclee Rodrigues Duran Momesso\nBanco: Inter";
 
         // 2. BUSCA O CARDÁPIO EM TEMPO REAL
         const menuOficial = await getCatalogText();
 
-        // 3. BUSCA OU CRIA O CLIENTE (Memória de longo prazo)
+        // 3. BUSCA OU CRIA O CLIENTE
         let customer = await prisma.customer.findUnique({ where: { phone: from } });
         if (!customer) {
             customer = await prisma.customer.create({ data: { phone: from } });
@@ -111,25 +109,24 @@ router.post("/webhook", async (req, res) => {
             await prisma.customer.update({ where: { phone: from }, data: { lastInteraction: new Date() } });
         }
 
-        // 4. MONTAGEM DO PROMPT DINÂMICO
+        // 4. MONTAGEM DO PROMPT
         const PROMPT_NEUROCIENCIA = `
-Você é o atendente humanizado da Pappi Pizza (Campinas-SP).
+Você é o atendente humanizado da Pappi Pizza.
 CLIENTE ATUAL: ${customer.name || "Dony"}
 
-SABORES E PREÇOS OFICIAIS (Use exatamente estes):
+SABORES E PREÇOS REAIS (CardápioWeb):
 ${menuOficial}
 
 DADOS PARA PAGAMENTO (PIX):
 ${pixTexto}
 
-REGRAS RÍGIDAS:
-1. Jamais invente preços. Siga a lista acima.
-2. Confirme sempre Rua, Número e Bairro para a entrega.
-3. Sugira a Pizza Margherita como o carro-chefe da casa.
-4. Chame o cliente pelo nome assim que ele se identificar.
+REGRAS:
+1. Use APENAS os preços e sabores da lista acima.
+2. Peça Rua, Número e Bairro para entrega em Campinas.
+3. Sugira a Pizza Margherita como favorita.
 `;
 
-        // 5. HISTÓRICO E GERAÇÃO DE RESPOSTA
+        // 5. GERAÇÃO DE RESPOSTA
         if (!chatHistory.has(from)) chatHistory.set(from, []);
         const history = chatHistory.get(from);
         history.push(`Cliente: ${text}`);
@@ -140,13 +137,11 @@ REGRAS RÍGIDAS:
         const respostaBot = result.response.text();
 
         history.push(`Atendente: ${respostaBot}`);
-
-        // 6. ENVIO PARA WHATSAPP
         await sendText(from, respostaBot);
 
     } catch (error) {
         console.error("🔥 Erro Geral:", error);
-        await sendText(from, "Puxa, tivemos um soluço técnico aqui na cozinha. Pode repetir o que você disse? 🍕");
+        await sendText(from, "Tivemos um pequeno problema técnico. Pode repetir? 🍕");
     }
 });
 

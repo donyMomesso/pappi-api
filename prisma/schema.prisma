@@ -1,3 +1,15 @@
+model Customer {
+  id              String   @id @default(uuid())
+  phone           String   @unique
+  name            String?
+  lastAddress     String?
+  lastInteraction DateTime @default(now())
+
+  // NOVOS:
+  lastFulfillment String?  // "entrega" | "retirada"
+  preferredPayment String? // "pix" | "cartao" | "dinheiro"
+}
+
 generator client {
   provider = "prisma-client-js"
 }

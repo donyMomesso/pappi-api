@@ -1,13 +1,40 @@
-const { loadRules } = require("../rules/loader");
 const express = require("express");
 const ENV = require("../config/env");
 const { PrismaClient } = require("@prisma/client");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
+const { loadRules } = require("../rules/loader");
 
 const router = express.Router();
 const prisma = new PrismaClient();
 
 const LINK_CARDAPIO = "https://pappipizza.cardapioweb.com";
+
+// ===============================
+// Anti-duplicação (WhatsApp pode reenviar)
+// ===============================
+const processedMsgIds = new Set();
+function alreadyProcessed(id) {
+  if (!id) return false;
+  if (processedMsgIds.has(id)) return true;
+  processedMsgIds.add(id);
+  if (processedMsgIds.size > 5000) processedMsgIds.clear();
+  return false;
+}
+
+// ===============================
+// Memória curta por telefone (últimas 10 falas)
+// ===============================
+const chatHistory = new Map();
+function pushHistory(phone, role, text) {
+  if (!chatHistory.has(phone)) chatHistory.set(phone, []);
+  const h = chatHistory.get(phone);
+  h.push({ role, text: String(text || "").slice(0, 900) });
+  if (h.length > 10) h.splice(0, h.length - 10);
+}
+function getHistoryText(phone) {
+  const h = chatHistory.get(phone) || [];
+  return h.map((x) => (x.role === "user" ? `Cliente: ${x.text}` : `Atendente: ${x.text}`)).join("\n");
+}
 
 // ===============================
 // IA (Gemini) - modelo via ENV + fallback
@@ -17,7 +44,6 @@ function getGeminiModel(preferred) {
   if (!apiKey) throw new Error("GEMINI_API_KEY não configurada no Render.");
 
   const genAI = new GoogleGenerativeAI(apiKey);
-
   const modelName = String(preferred || ENV.GEMINI_MODEL || "gemini-2.5-flash").replace(/^models\//, "");
   return genAI.getGenerativeModel({ model: modelName });
 }
@@ -41,7 +67,7 @@ async function geminiGenerate(content) {
 }
 
 // ===============================
-// HELPERS (WHATSAPP & ÁUDIO)
+// HELPERS (WHATSAPP)
 // ===============================
 function digitsOnly(str) {
   return String(str || "").replace(/\D/g, "");
@@ -74,27 +100,75 @@ async function sendText(to, text) {
   });
 }
 
+// ===============================
+// ÁUDIO: baixar arquivo do WhatsApp
+// ===============================
 async function downloadAudio(mediaId) {
   try {
     if (!ENV.WHATSAPP_TOKEN) return null;
 
-    const urlResp = await fetch(`https://graph.facebook.com/v24.0/${mediaId}`, {
+    // 1) pega URL do media
+    const metaResp = await fetch(`https://graph.facebook.com/v24.0/${mediaId}`, {
       headers: { Authorization: `Bearer ${ENV.WHATSAPP_TOKEN}` },
     });
-
-    const meta = await urlResp.json();
+    const meta = await metaResp.json();
     const url = meta?.url;
     if (!url) return null;
 
-    const media = await fetch(url, {
+    // 2) baixa o binário
+    const mediaResp = await fetch(url, {
       headers: { Authorization: `Bearer ${ENV.WHATSAPP_TOKEN}` },
     });
 
-    const buffer = await media.arrayBuffer();
-    return Buffer.from(buffer).toString("base64");
+    const mimeType = mediaResp.headers.get("content-type") || "audio/ogg";
+    const buffer = await mediaResp.arrayBuffer();
+    const base64 = Buffer.from(buffer).toString("base64");
+
+    return { base64, mimeType };
   } catch (e) {
     console.error("❌ downloadAudio erro:", e?.message || e);
     return null;
+  }
+}
+
+// ✅ ÁUDIO: transcrever + extrair pedido (JSON)
+async function transcribeAndExtractOrderFromAudio(base64, mimeType) {
+  const PROMPT_AUDIO = `
+Você é o atendente da Pappi Pizza.
+Tarefa: TRANSCRAVA o áudio do cliente e EXTRAIA dados do pedido.
+
+Responda SOMENTE em JSON válido (sem texto fora do JSON):
+{
+  "transcription": "...",
+  "size_slices": 4|8|16|null,
+  "is_half_half": true|false|null,
+  "flavors": ["...","..."],
+  "wants_menu": true|false|null
+}
+
+Regras:
+- Não invente sabores. Só coloque sabores que o cliente falou claramente.
+- Se o cliente falar "meio a meio", is_half_half = true (mesmo sem falar sabores).
+- Se falar "16" ou "gigante", size_slices = 16. Se falar "8/grande" => 8. "4/brotinho" => 4.
+- Se o cliente pedir "sabores/cardápio", wants_menu = true.
+`.trim();
+
+  const content = [
+    { text: PROMPT_AUDIO },
+    { inlineData: { data: base64, mimeType: mimeType || "audio/ogg" } },
+  ];
+
+  const raw = await geminiGenerate(content);
+
+  try {
+    const clean = String(raw || "")
+      .replace(/^```json\s*/i, "")
+      .replace(/^```\s*/i, "")
+      .replace(/```$/i, "")
+      .trim();
+    return JSON.parse(clean);
+  } catch {
+    return { transcription: String(raw || "").trim(), size_slices: null, is_half_half: null, flavors: [], wants_menu: null };
   }
 }
 
@@ -185,50 +259,49 @@ function normalizeAddress(merchant) {
 router.get("/", (req, res) => res.send("Pappi API IA online 🧠✅"));
 router.get("/health", (req, res) => res.json({ ok: true, app: "Pappi Pizza IA" }));
 
-router.get("/modelos-disponiveis", async (req, res) => {
-  try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${ENV.GEMINI_API_KEY}`;
-    const response = await fetch(url);
-    const data = await response.json();
-    res.json(data);
-  } catch (error) {
-    res.status(500).json({ erro: error.message });
-  }
-});
-
 // ===============================
-// WEBHOOK PRINCIPAL
+// WEBHOOK PRINCIPAL (WhatsApp)
 // ===============================
 router.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 
   const msg = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
   if (!msg) return;
+  if (alreadyProcessed(msg.id)) return;
 
   const from = msg.from;
 
   try {
-    // Entrada (texto ou áudio)
     let userText = "";
-    let aiParts = null;
 
+    // 1) Entrada (texto ou áudio)
     if (msg.type === "audio") {
-      const base64 = await downloadAudio(msg.audio?.id);
-      if (!base64) {
+      const audio = await downloadAudio(msg.audio?.id);
+      if (!audio?.base64) {
         await sendText(from, "Puxa, não consegui ouvir esse áudio 😕 Pode escrever pra mim?");
         return;
       }
 
-      aiParts = [
-        { inlineData: { data: base64, mimeType: "audio/ogg" } },
-        { text: "O cliente mandou um áudio. Transcreva e responda como atendente da Pappi Pizza." },
-      ];
+      const info = await transcribeAndExtractOrderFromAudio(audio.base64, audio.mimeType);
+
+      userText = `ÁUDIO TRANSCRITO: ${info.transcription || ""}`.trim();
+
+      const extras = [];
+      if (info.size_slices) extras.push(`Tamanho detectado: ${info.size_slices} fatias`);
+      if (info.is_half_half === true) extras.push(`Pedido: meio a meio`);
+      if (Array.isArray(info.flavors) && info.flavors.length) extras.push(`Sabores: ${info.flavors.join(" e ")}`);
+      if (info.wants_menu === true) extras.push(`Cliente pediu: cardápio/sabores`);
+
+      if (extras.length) userText += `\nDADOS EXTRAÍDOS: ${extras.join(" | ")}`;
     } else {
       userText = msg.text?.body || "";
       if (!userText) return;
     }
 
-    // Busca dados
+    // 2) Salva histórico do cliente
+    pushHistory(from, "user", userText);
+
+    // 3) Busca dados (menu/merchant/pix)
     const [menu, merchant, configPix] = await Promise.all([
       getMenu(),
       getMerchant(),
@@ -239,39 +312,44 @@ router.post("/webhook", async (req, res) => {
     const enderecoLoja = normalizeAddress(merchant);
     const pix = configPix?.value || "PIX: 19 9 8319 3999 - Darclee Duran";
 
+    const RULES = loadRules();
+    const historyText = getHistoryText(from);
+
+    // 4) Prompt central (regras + dados + menu + histórico)
     const PROMPT = `
 Você é o atendente virtual da Pappi Pizza (Campinas-SP).
-Seja rápido, simpático e objetivo. Use emojis moderadamente.
 
-REGRAS:
-- Se o cliente pedir pizza, pergunte tamanho: Brotinho (4), Grande (8) ou Gigante (16), se ele não falou.
-- Se o cliente mandar endereço incompleto, peça Rua + Número + Bairro.
-- Se o cliente pedir “promoção”, sugira 2 opções do cardápio que estão saindo muito hoje.
-- Sempre finalize perguntando: "Posso confirmar e mandar pra cozinha?"
+Siga rigorosamente as regras abaixo:
+${RULES}
 
 DADOS DA LOJA:
-- Endereço da loja: ${enderecoLoja}
-- Formas de pagamento: ${pagamentos}
+- Endereço: ${enderecoLoja}
+- Pagamentos: ${pagamentos}
 - PIX: ${pix}
 - Cardápio online: ${LINK_CARDAPIO}
 
-CARDÁPIO (resumo):
+CARDÁPIO (use quando o cliente pedir sabores/valores):
 ${menu}
+
+HISTÓRICO DA CONVERSA (use para NÃO repetir perguntas):
+${historyText}
 `.trim();
 
-    // Monta conteúdo
-    const content = aiParts
-      ? [{ text: PROMPT }, ...aiParts]
-      : `${PROMPT}\n\nCliente: ${userText}\nAtendente:`;
+    // 5) Monta conteúdo
+    const content = `${PROMPT}\n\nCliente: ${userText}\nAtendente:`;
 
-    // Gera e envia
+    // 6) Gera e envia
     const resposta = await geminiGenerate(content);
+
+    // 7) Salva histórico do bot
+    pushHistory(from, "assistant", resposta);
+
     await sendText(from, resposta);
   } catch (error) {
     console.error("🔥 Erro:", error);
     await sendText(
       from,
-      `Ops! Tive um probleminha técnico aqui 😅🍕\n\nPeça rapidinho pelo nosso cardápio online:\n${LINK_CARDAPIO}`
+      `Tive uma instabilidade rapidinha 😅🍕\nMe manda de novo: seu pedido + se é entrega ou retirada.\nSe preferir, peça aqui:\n${LINK_CARDAPIO}`
     );
   }
 });

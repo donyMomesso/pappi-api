@@ -6,7 +6,7 @@ const { GoogleGenerativeAI } = require("@google/generative-ai");
 const router = express.Router();
 const prisma = new PrismaClient();
 
-// Inicializa a IA do Google com o modelo gratuito confirmado na sua conta
+// Inicializa a IA com o modelo gratuito confirmado
 const apiKey = process.env.GEMINI_API_KEY || "";
 const genAI = new GoogleGenerativeAI(apiKey);
 const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
@@ -31,12 +31,40 @@ async function sendText(to, text) {
 }
 
 // ===============================
-// 2. MEMÓRIA DE CONVERSA (Curto Prazo)
+// 2. BUSCA DO CARDÁPIO WEB (Fonte Única de Sabores e Preços)
+// ===============================
+async function getCatalogText() {
+    const url = `${ENV.CARDAPIOWEB_BASE_URL}/api/partner/v1/catalog`;
+    try {
+        const resp = await fetch(url, { headers: { "X-API-KEY": ENV.CARDAPIOWEB_TOKEN, "Accept": "application/json" } });
+        const data = await resp.json();
+        
+        if (!data.categories) return "Cardápio indisponível no momento.";
+        
+        let menuText = "CARDÁPIO PAPPI PIZZA (Sincronizado):\n";
+        data.categories.forEach(cat => {
+            if(cat.status === "ACTIVE") {
+                menuText += `\n[Categoria: ${cat.name}]\n`;
+                cat.items.forEach(item => {
+                    if(item.status === "ACTIVE") {
+                        menuText += `- ${item.name}: R$ ${item.price} - ${item.description || ""}\n`;
+                    }
+                });
+            }
+        });
+        return menuText;
+    } catch (e) {
+        return "Erro ao sincronizar cardápio.";
+    }
+}
+
+// ===============================
+// 3. MEMÓRIA DE CURTO PRAZO
 // ===============================
 const chatHistory = new Map();
 
 // ===============================
-// 3. ROTAS E WEBHOOK
+// 4. ROTAS E WEBHOOK
 // ===============================
 router.get("/", (req, res) => res.send("Pappi API IA online 🧠✅"));
 
@@ -58,14 +86,14 @@ router.post("/webhook", async (req, res) => {
     if (!text) return;
 
     try {
-        // 1. BUSCA DADOS NO BANCO EM TEMPO REAL (Sabores e PIX)
+        // 1. BUSCA O PIX NO BANCO (Sua regra fixa)
         const configPix = await prisma.config.findUnique({ where: { key: "CHAVE_PIX" } });
-        const saboresDb = await prisma.sabores.findMany({ where: { disponivel: true } });
-        
-        const pixTexto = configPix ? configPix.value : "pappi@pix.com (CNPJ)";
-        const listaSabores = saboresDb.map(s => `- ${s.nome}: R$ ${s.preco} (${s.ingredientes || ""})`).join("\n");
+        const pixTexto = configPix ? configPix.value : "PIX: 19 9 8319 3999 (Celular)\nTitular: Darclee Rodrigues Duran Momesso\nBanco: Inter";
 
-        // 2. BUSCA OU CRIA O CLIENTE (Memória de longo prazo)
+        // 2. BUSCA O CARDÁPIO EM TEMPO REAL
+        const menuOficial = await getCatalogText();
+
+        // 3. BUSCA OU CRIA O CLIENTE (Memória de longo prazo)
         let customer = await prisma.customer.findUnique({ where: { phone: from } });
         if (!customer) {
             customer = await prisma.customer.create({ data: { phone: from } });
@@ -73,42 +101,42 @@ router.post("/webhook", async (req, res) => {
             await prisma.customer.update({ where: { phone: from }, data: { lastInteraction: new Date() } });
         }
 
-        // 3. PREPARA O CÉREBRO DA IA COM AS REGRAS DO BANCO
-        const PROMPT_DINAMICO = `
-Você é o atendente da Pappi Pizza (Campinas-SP).
-CLIENTE: ${customer.name || "Novo Cliente"} (${from})
+        // 4. MONTAGEM DO PROMPT DINÂMICO
+        const PROMPT_NEUROCIENCIA = `
+Você é o atendente humanizado da Pappi Pizza.
+CLIENTE: ${customer.name || "Dony"}
 
-SABORES DISPONÍVEIS (Use estes preços):
-${listaSabores || "Consulte nosso atendente para os sabores do dia."}
+SABORES E PREÇOS REAIS (Siga rigorosamente):
+${menuOficial}
 
-FORMA DE PAGAMENTO (PIX):
+PAGAMENTO (PIX):
 ${pixTexto}
 
-REGRAS OBRIGATÓRIAS:
-1. Sempre confirme Rua, Número e Bairro para entrega.
-2. Sugira a Pizza Margherita como a favorita da casa.
-3. Seja cordial e use emojis moderadamente.
+REGRAS DE OURO:
+1. Use APENAS os preços e sabores da lista acima. Se não estiver lá, não temos.
+2. Peça Rua, Número e Bairro para entrega em Campinas.
+3. Sugira a Pizza Margherita como favorita.
+4. Chame o cliente pelo nome assim que souber.
 `;
 
-        // 4. HISTÓRICO DE CURTO PRAZO
+        // 5. HISTÓRICO E GERAÇÃO DE RESPOSTA
         if (!chatHistory.has(from)) chatHistory.set(from, []);
         const history = chatHistory.get(from);
         history.push(`Cliente: ${text}`);
         if (history.length > 10) history.shift();
 
-        // 5. GERA RESPOSTA COM GEMINI 2.5 FLASH
-        const fullPrompt = `${PROMPT_DINAMICO}\n\nHistórico:\n${history.join("\n")}\n\nAtendente:`;
+        const fullPrompt = `${PROMPT_NEUROCIENCIA}\n\nHistórico:\n${history.join("\n")}\n\nAtendente:`;
         const result = await model.generateContent(fullPrompt);
         const respostaBot = result.response.text();
 
         history.push(`Atendente: ${respostaBot}`);
 
-        // 6. ENVIA PARA O WHATSAPP
+        // 6. ENVIO PARA WHATSAPP
         await sendText(from, respostaBot);
 
     } catch (error) {
-        console.error("🔥 Erro na IA/Banco:", error);
-        await sendText(from, "Puxa, tivemos um pequeno problema técnico. Pode repetir? 🍕");
+        console.error("🔥 Erro na sincronização IA/Banco:", error);
+        await sendText(from, "Puxa, deu um erro técnico aqui. Pode repetir sua mensagem? 🍕");
     }
 });
 

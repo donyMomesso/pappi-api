@@ -19,3 +19,4 @@ function loadRulesFromFiles(mode) {
 }
 
 module.exports = { loadRulesFromFiles };
+

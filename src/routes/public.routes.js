@@ -6,10 +6,10 @@ const { GoogleGenerativeAI } = require("@google/generative-ai");
 const router = express.Router();
 const prisma = new PrismaClient();
 
-// Inicializa a IA com o modelo gratuito confirmado
+// ALTERADO: Usando o modelo 1.5-flash (Estável e Gratuito) para evitar erro de cota (429)
 const apiKey = process.env.GEMINI_API_KEY || "";
 const genAI = new GoogleGenerativeAI(apiKey);
-const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
 // ===============================
 // 1. HELPERS E WHATSAPP ENGINE
@@ -35,7 +35,6 @@ async function sendText(to, text) {
 // ===============================
 async function getCatalogText() {
     const url = "https://integracao.sandbox.cardapioweb.com/api/partner/v1/catalog";
-    
     try {
         const resp = await fetch(url, { 
             method: 'GET',
@@ -101,7 +100,7 @@ router.post("/webhook", async (req, res) => {
         // 2. BUSCA O CARDÁPIO EM TEMPO REAL
         const menuOficial = await getCatalogText();
 
-        // 3. BUSCA OU CRIA O CLIENTE
+        // 3. BUSCA OU CRIA O CLIENTE (Longo Prazo)
         let customer = await prisma.customer.findUnique({ where: { phone: from } });
         if (!customer) {
             customer = await prisma.customer.create({ data: { phone: from } });
@@ -110,19 +109,19 @@ router.post("/webhook", async (req, res) => {
         }
 
         // 4. MONTAGEM DO PROMPT
-        const PROMPT_NEUROCIENCIA = `
-Você é o atendente humanizado da Pappi Pizza.
-CLIENTE ATUAL: ${customer.name || "Dony"}
+        const PROMPT_SISTEMA = `
+Você é o atendente da Pappi Pizza (Campinas-SP).
+Atenda o cliente: ${customer.name || "Dony"}
 
-SABORES E PREÇOS REAIS (CardápioWeb):
+CARDÁPIO ATUAL (Use estes preços):
 ${menuOficial}
 
-DADOS PARA PAGAMENTO (PIX):
+PAGAMENTO (PIX):
 ${pixTexto}
 
 REGRAS:
-1. Use APENAS os preços e sabores da lista acima.
-2. Peça Rua, Número e Bairro para entrega em Campinas.
+1. Nunca invente sabores ou preços.
+2. Peça Rua, Número e Bairro para entrega.
 3. Sugira a Pizza Margherita como favorita.
 `;
 
@@ -132,7 +131,7 @@ REGRAS:
         history.push(`Cliente: ${text}`);
         if (history.length > 10) history.shift();
 
-        const fullPrompt = `${PROMPT_NEUROCIENCIA}\n\nHistórico:\n${history.join("\n")}\n\nAtendente:`;
+        const fullPrompt = `${PROMPT_SISTEMA}\n\nHistórico:\n${history.join("\n")}\n\nAtendente:`;
         const result = await model.generateContent(fullPrompt);
         const respostaBot = result.response.text();
 
@@ -141,7 +140,8 @@ REGRAS:
 
     } catch (error) {
         console.error("🔥 Erro Geral:", error);
-        await sendText(from, "Tivemos um pequeno problema técnico. Pode repetir? 🍕");
+        // Se der erro de cota de novo, enviamos uma mensagem amigável
+        await sendText(from, "Puxa, estamos com muitos pedidos agora! Pode repetir sua mensagem em 1 minuto? 🍕");
     }
 });
 

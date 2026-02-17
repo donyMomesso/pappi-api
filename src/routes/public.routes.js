@@ -11,7 +11,8 @@ const prisma = new PrismaClient();
 
 // Modelo estável para evitar erros de cota 429
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
-const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" });
+
 
 // Memória de histórico curta (opcional, já que usamos banco para longo prazo)
 const chatHistory = new Map();

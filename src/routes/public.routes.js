@@ -1,3 +1,7 @@
+const { getContextMode } = require("../services/context.service");
+const mode = getContextMode(customer);
+const RULES = loadRules(mode);
+
 const express = require("express");
 const ENV = require("../config/env");
 const { PrismaClient } = require("@prisma/client");

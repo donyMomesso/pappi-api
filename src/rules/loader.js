@@ -1,19 +1,24 @@
 const fs = require("fs");
 const path = require("path");
 
-let cache = { text: "", mtimeMs: 0 };
+function loadFile(name) {
+  const filePath = path.join(__dirname, name);
+  if (!fs.existsSync(filePath)) return "";
+  return fs.readFileSync(filePath, "utf8");
+}
 
-function loadRules() {
-  const filePath = path.join(__dirname, "rules.md");
-  const stats = fs.statSync(filePath);
+function loadRules(mode) {
+  const base = loadFile("rules.md");
 
-  if (stats.mtimeMs !== cache.mtimeMs) {
-    cache.text = fs.readFileSync(filePath, "utf8");
-    cache.mtimeMs = stats.mtimeMs;
-    console.log("📜 Regras atualizadas!");
+  if (mode === "VIP") {
+    return base + "\n\n" + loadFile("vip.md");
   }
 
-  return cache.text;
+  if (mode === "EVENT") {
+    return base + "\n\n" + loadFile("event.md");
+  }
+
+  return base;
 }
 
 module.exports = { loadRules };

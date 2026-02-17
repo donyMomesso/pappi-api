@@ -5,7 +5,7 @@ function calcDeliveryFeeKm(km) {
   if (km <= 3) return 8;
   if (km <= 6) return 12;
   if (km <= 10) return 15;
-  return null;
+  return null; // acima de 10km não atende
 }
 
 async function quoteByAddress(address) {
@@ -68,4 +68,3 @@ module.exports = {
   quoteByAddress,
   reverseGeocode
 };
-

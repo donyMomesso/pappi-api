@@ -40,25 +40,91 @@ function getHistoryText(phone) {
   const h = chatHistory.get(phone) || [];
   return h.map((x) => (x.role === "user" ? `Cliente: ${x.text}` : `Atendente: ${x.text}`)).join("\n");
 }
+// ===============================
+// IA (Gemini) - auto resolve modelo via ListModels
+// ===============================
+const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
+let cachedGeminiModel = null;
 
-// ===============================
-// IA (Gemini)
-// ===============================
-function getGeminiModel(preferred) {
+async function listGeminiModels() {
   const apiKey = ENV.GEMINI_API_KEY || "";
   if (!apiKey) throw new Error("GEMINI_API_KEY não configurada no Render.");
-  const genAI = new GoogleGenerativeAI(apiKey);
-  // DE VOLTA PARA O SEU GEMINI 2.5
-  const modelName = String(preferred || ENV.GEMINI_MODEL || "gemini-2.5-flash").replace(/^models\//, "");
-  return genAI.getGenerativeModel({ model: modelName });
+
+  const resp = await fetch(`${GEMINI_API_BASE}/models`, {
+    headers: { "x-goog-api-key": apiKey },
+  });
+
+  if (!resp.ok) {
+    const txt = await resp.text().catch(() => "");
+    throw new Error(`ListModels failed: ${resp.status} ${txt}`);
+  }
+
+  const data = await resp.json();
+  return data.models || [];
+}
+
+function pickGeminiModel(models) {
+  const supported = models.filter((m) =>
+    (m.supportedGenerationMethods || []).includes("generateContent")
+  );
+
+  // prioridade: usa ENV.GEMINI_MODEL se existir, senão tenta alguns comuns,
+  // senão pega o primeiro que suportar generateContent
+  const preferred = [
+    (ENV.GEMINI_MODEL || "").replace(/^models\//, ""),
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+    "gemini-2.0-flash",
+  ].filter(Boolean);
+
+  for (const name of preferred) {
+    const full = name.startsWith("models/") ? name : `models/${name}`;
+    const found = supported.find((m) => m.name === full);
+    if (found) return found.name;
+  }
+
+  return supported[0]?.name || null;
+}
+
+async function ensureGeminiModel() {
+  if (cachedGeminiModel) return cachedGeminiModel;
+
+  const models = await listGeminiModels();
+  const picked = pickGeminiModel(models);
+
+  if (!picked) {
+    throw new Error("Nenhum modelo com generateContent disponível (ListModels não retornou suportados).");
+  }
+
+  cachedGeminiModel = picked;
+  console.log("🤖 Gemini model selecionado:", cachedGeminiModel);
+  return cachedGeminiModel;
 }
 
 async function geminiGenerate(content) {
-  // DE VOLTA PARA O SEU GEMINI 2.5
-  const modelName = String(ENV.GEMINI_MODEL || "gemini-2.5-flash").replace(/^models\//, "");
-  const model = getGeminiModel(modelName);
-  const result = await model.generateContent(content);
-  return result.response.text();
+  const apiKey = ENV.GEMINI_API_KEY || "";
+  const model = await ensureGeminiModel();
+
+  const resp = await fetch(`${GEMINI_API_BASE}/${model}:generateContent`, {
+    method: "POST",
+    headers: {
+      "x-goog-api-key": apiKey,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: content }] }],
+    }),
+  });
+
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    throw new Error(`generateContent failed: ${resp.status} ${JSON.stringify(data)}`);
+  }
+
+  return (
+    data?.candidates?.[0]?.content?.parts?.map((p) => p.text).filter(Boolean).join("") ||
+    ""
+  );
 }
 
 // ===============================

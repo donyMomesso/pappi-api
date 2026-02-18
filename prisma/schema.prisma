@@ -8,14 +8,14 @@ datasource db {
 }
 
 model Customer {
-  id              String   @id @default(uuid())
-  phone           String   @unique
-  name            String?
-  lastAddress     String?
-  lastInteraction DateTime @default(now())
-  lastFulfillment String?  
+  id               String   @id @default(uuid())
+  phone            String   @unique
+  name             String?
+  lastAddress      String?
+  lastInteraction  DateTime @default(now())
+  lastFulfillment  String?  
   preferredPayment String? 
-  orders          Order[]
+  orders           Order[]
 }
 
 model Order {

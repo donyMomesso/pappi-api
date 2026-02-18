@@ -1,33 +1,23 @@
-router.post("/webhook", async (req, res) => {
-  res.sendStatus(200);
+const express = require("express");
+const ENV = require("../config/env");
+const router = express.Router();
 
-  try {
-    const msgs = extractIncomingMessages(req.body);
+// Verificação do Webhook (Meta)
+router.get("/webhook", (req, res) => {
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
 
-    for (const msg of msgs) {
-      const from = msg.from;
-      const text = (msg.text || "").trim();
-      const t = normalizeText(text);
-
-      console.log("📩 MSG:", { from, type: msg.type, text: text.slice(0, 80) });
-
-      // ✅ Se digitar "menu", abre o menu de verdade
-      if (t === "menu" || t === "inicio" || t === "começar" || t === "comecar" || t === "oi" || t === "ola") {
-        await sendButtons(from, "🍕 Pappi Pizza\nOpa 😄 como posso te ajudar hoje?", [
-          { id: "M_PEDIR", title: "🛒 Fazer pedido" },
-          { id: "M_CARDAPIO", title: "📖 Cardápio" },
-          { id: "M_STATUS", title: "📦 Status" },
-        ]);
-        continue;
-      }
-
-      // ✅ Caso não seja menu, responde e orienta
-      await sendText(
-        from,
-        `👋 Recebi: "${text || "(sem texto)"}"\n\nDigite *menu* pra ver as opções 🍕`
-      );
-    }
-  } catch (err) {
-    console.error("🔥 Erro no webhook:", err?.message, err?.payload || "");
+  if (mode === "subscribe" && token === ENV.WEBHOOK_VERIFY_TOKEN) {
+    return res.status(200).send(challenge);
   }
+  return res.sendStatus(403);
 });
+
+// Recebimento de mensagens (POST)
+router.post("/webhook", (req, res) => {
+  // A lógica de processamento continua no public.routes por enquanto
+  return res.sendStatus(200);
+});
+
+module.exports = router;

@@ -1,20 +1,29 @@
 const ENV = require("../config/env");
 
-async function getOrderHistory(phone) {
-    const url = `https://integracao.sandbox.cardapioweb.com/api/partner/v1/orders?phone=${phone}`;
+async function changeOrderStatus(orderId, action) {
+    // URL de Produção conforme a documentação que você enviou
+    const url = `https://integracao.cardapioweb.com/api/partner/v1/orders/${orderId}/${action}`;
+    
     try {
-        const resp = await fetch(url, { 
-            headers: { "X-API-KEY": ENV.CARDAPIOWEB_TOKEN, "Accept": "application/json" } 
+        const response = await fetch(url, {
+            method: "POST",
+            headers: {
+                "X-API-KEY": ENV.CARDAPIOWEB_TOKEN,
+                "Accept": "application/json",
+                "Content-Type": "application/json"
+            }
         });
-        const data = await resp.json();
-        if (!data || data.length === 0) return "Sem histórico de pedidos.";
 
-        let history = "🕒 *ÚLTIMOS PEDIDOS:*\n";
-        data.slice(0, 2).forEach(o => {
-            history += `- Pedido #${o.id}: ${o.status} (R$ ${o.total.toFixed(2)})\n`;
-        });
-        return history;
-    } catch (e) { return "Histórico indisponível."; }
+        // O CardápioWeb retorna 204 quando dá tudo certo
+        if (response.status === 204) {
+            return { ok: true };
+        }
+        
+        const errorData = await response.json();
+        return { ok: false, error: errorData.message || "Erro desconhecido" };
+    } catch (e) {
+        return { ok: false, error: e.message };
+    }
 }
 
-module.exports = { getOrderHistory };
+module.exports = { changeOrderStatus };

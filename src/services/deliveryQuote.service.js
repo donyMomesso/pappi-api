@@ -2,7 +2,7 @@ const ENV = require("../config/env");
 
 // ⚠️ IMPORTANTE: ajuste o nome do arquivo abaixo conforme seu projeto
 // Pelo seu print, o nome é "mapas.serviço.js"
-const maps = require("./mapas.serviço");
+const { calculateDistance } = require("./maps.service");
 
 // limites (mas quem manda mesmo é a taxa do maps: acima de 10km fica null)
 const MAX_KM = Number(process.env.DELIVERY_MAX_KM || 12);

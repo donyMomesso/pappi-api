@@ -1,14 +1,14 @@
 const express = require("express");
+const webhookRoutes = require("./routes/webhook.routes");
 const publicRoutes = require("./routes/public.routes");
 const internalRoutes = require("./routes/internal.routes");
 const mapsRoutes = require("./routes/maps.routes");
-const webhookRoutes = require("./routes/webhook.routes");
 
 const app = express();
 app.use(express.json({ limit: "10mb" }));
 
-// Rotas organizadas por prioridade
-app.use("/", webhookRoutes); 
+// A ordem aqui é vital para o WhatsApp não travar
+app.use("/", webhookRoutes);
 app.use("/", publicRoutes);
 app.use("/", internalRoutes);
 app.use("/", mapsRoutes);

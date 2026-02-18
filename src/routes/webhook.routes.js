@@ -2,7 +2,7 @@ const express = require("express");
 const ENV = require("../config/env");
 const router = express.Router();
 
-// Verificação do Webhook (Meta)
+// GET /webhook: Apenas para o Facebook validar seu servidor
 router.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -12,12 +12,6 @@ router.get("/webhook", (req, res) => {
     return res.status(200).send(challenge);
   }
   return res.sendStatus(403);
-});
-
-// Recebimento de mensagens (POST)
-router.post("/webhook", (req, res) => {
-  // A lógica de processamento continua no public.routes por enquanto
-  return res.sendStatus(200);
 });
 
 module.exports = router;

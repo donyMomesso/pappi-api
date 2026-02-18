@@ -1,15 +1,3 @@
-model Customer {
-  id              String   @id @default(uuid())
-  phone           String   @unique
-  name            String?
-  lastAddress     String?
-  lastInteraction DateTime @default(now())
-
-  // NOVOS:
-  lastFulfillment String?  // "entrega" | "retirada"
-  preferredPayment String? // "pix" | "cartao" | "dinheiro"
-}
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -22,9 +10,29 @@ datasource db {
 model Customer {
   id              String   @id @default(uuid())
   phone           String   @unique
-  name            String?  
-  lastAddress     String?  
+  name            String?
+  lastAddress     String?
   lastInteraction DateTime @default(now())
+  
+  // Informações de preferência para agilizar o próximo pedido
+  lastFulfillment String?  // "delivery" | "takeout"
+  preferredPayment String? // "pix" | "credit_card" | "debit_card"
+  
+  // Relação com os pedidos do cliente
+  orders          Order[]
+}
+
+model Order {
+  id          String   @id @default(uuid())
+  displayId   String   @unique // O número amigável do pedido (ex: 5371)
+  status      String   @default("waiting_confirmation")
+  total       Float
+  items       String   // Descrição simplificada dos itens comprados
+  createdAt   DateTime @default(now())
+  
+  // Ligação com o cliente
+  customerId  String
+  customer    Customer @relation(fields: [customerId], references: [id])
 }
 
 model Config {

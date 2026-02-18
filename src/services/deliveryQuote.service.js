@@ -1,8 +1,5 @@
 const ENV = require("../config/env");
-
-// ⚠️ IMPORTANTE: ajuste o nome do arquivo abaixo conforme seu projeto
-// Pelo seu print, o nome é "mapas.serviço.js"
-const { calculateDistance } = require("./maps.service");
+const maps = require("./maps.service");
 
 // limites (mas quem manda mesmo é a taxa do maps: acima de 10km fica null)
 const MAX_KM = Number(process.env.DELIVERY_MAX_KM || 12);
@@ -19,13 +16,12 @@ function hasEnoughAddress(text) {
 
 async function quoteDeliveryIfPossible({ addressText }) {
   if (!ENV.GOOGLE_MAPS_API_KEY) return { ok: false, reason: "NO_KEY" };
-  if (!Number.isFinite(ENV.STORE_LAT) || !Number.isFinite(ENV.STORE_LNG)) return { ok: false, reason: "NO_STORE_COORDS" };
-
+  if (!Number.isFinite(ENV.STORE_LAT) || !Number.isFinite(ENV.STORE_LNG))
+    return { ok: false, reason: "NO_STORE_COORDS" };
   if (!hasEnoughAddress(addressText)) return { ok: false, reason: "INCOMPLETE_ADDRESS" };
 
   try {
     const q = await maps.quoteByAddress(addressText);
-
     const km = Number(q?.km);
     if (!Number.isFinite(km)) return { ok: false, reason: "NO_KM" };
 
@@ -40,7 +36,6 @@ async function quoteDeliveryIfPossible({ addressText }) {
       etaMin: q?.eta_minutes ?? null,
       fee: q?.delivery_fee ?? null,
       formatted: q?.formatted_address || addressText,
-      // info extra útil
       service_limit_km_hint: MAX_KM,
     };
   } catch (e) {
@@ -48,4 +43,4 @@ async function quoteDeliveryIfPossible({ addressText }) {
   }
 }
 
-module.exports = { quoteDeliveryIfPossible };
+module.exports = { quoteDeliveryIfPossible, MAX_KM };

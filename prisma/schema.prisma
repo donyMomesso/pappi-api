@@ -13,24 +13,19 @@ model Customer {
   name            String?
   lastAddress     String?
   lastInteraction DateTime @default(now())
-  
-  // Informações de preferência para agilizar o próximo pedido
   lastFulfillment String?  // "delivery" | "takeout"
-  preferredPayment String? // "pix" | "credit_card" | "debit_card"
+  preferredPayment String? // "pix" | "cartao" | "dinheiro"
   
-  // Relação com os pedidos do cliente
   orders          Order[]
 }
 
 model Order {
   id          String   @id @default(uuid())
-  displayId   String   @unique // O número amigável do pedido (ex: 5371)
+  displayId   String   @unique 
   status      String   @default("waiting_confirmation")
   total       Float
-  items       String   // Descrição simplificada dos itens comprados
+  items       String   
   createdAt   DateTime @default(now())
-  
-  // Ligação com o cliente
   customerId  String
   customer    Customer @relation(fields: [customerId], references: [id])
 }

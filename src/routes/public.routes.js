@@ -358,13 +358,12 @@ function normalizeAddress(merchant) {
 }
 
 // ===============================
-// EXTRAÇÃO SIMPLES
+// EXTRAÇÃO SIMPLES - NOME ARRUMADO!
 // ===============================
 function extractNameLight(text) {
   const t = String(text || "").trim();
-  const m =
-    t.match(/(?:meu nome é|aqui é o|aqui é a|sou o|sou a)\s+([A-Za-zÀ-ÿ]+(?:\s+[A-Za-zÀ-ÿ]+){0,2})/i) ||
-    t.match(/^([A-Za-zÀ-ÿ]{2,})(?:\s+[A-Za-zÀ-ÿ]{2,})?$/); 
+  // Só pega o nome se o cliente usar essas frases claras.
+  const m = t.match(/(?:meu nome é|aqui é o|aqui é a|sou o|sou a|me chamo)\s+([A-Za-zÀ-ÿ]+(?:\s+[A-Za-zÀ-ÿ]+){0,2})/i); 
 
   const name = m?.[1]?.trim();
   if (!name) return null;
@@ -530,7 +529,8 @@ router.post("/webhook", async (req, res) => {
       }
 
       if (!delivery?.ok) {
-        await sendText(from, "Perfeito! Me manda seu endereço com *Rua + Número + Bairro* pra eu calcular a entrega certinho 😊");
+        // MENSAGEM DO MAPA ARRUMADA
+        await sendText(from, "Hmm, não consegui achar esse endereço no mapa 🗺️.\nPor favor, envie o endereço completo com *Rua, Número e Bairro* para eu calcular a taxa certinho! 😊");
         return;
       }
     }

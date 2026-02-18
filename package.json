@@ -1,12 +1,10 @@
 {
   "name": "pappi-api",
   "version": "2.0.0",
-  "description": "API Pappi Pizza com IA e Integração CardápioWeb",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "postinstall": "prisma generate",
-    "seed": "node seed.js"
+    "postinstall": "prisma generate"
   },
   "dependencies": {
     "@google/generative-ai": "^0.21.0",

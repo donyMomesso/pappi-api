@@ -13,9 +13,8 @@ model Customer {
   name            String?
   lastAddress     String?
   lastInteraction DateTime @default(now())
-  lastFulfillment String?  // "delivery" | "takeout"
-  preferredPayment String? // "pix" | "cartao" | "dinheiro"
-  
+  lastFulfillment String?  
+  preferredPayment String? 
   orders          Order[]
 }
 

@@ -39,3 +39,13 @@ module.exports = {
   STORE_LAT: toNumber(process.env.STORE_LAT, null),
   STORE_LNG: toNumber(process.env.STORE_LNG, null),
 };
+require("dotenv").config();
+
+module.exports = {
+  WHATSAPP_TOKEN: process.env.WHATSAPP_TOKEN || "",
+  WHATSAPP_PHONE_NUMBER_ID: process.env.WHATSAPP_PHONE_NUMBER_ID || "",
+  CARDAPIOWEB_TOKEN: process.env.CARDAPIOWEB_TOKEN || "",
+  CARDAPIOWEB_BASE_URL: process.env.CARDAPIOWEB_BASE_URL || "https://integracao.cardapioweb.com",
+  GEMINI_API_KEY: process.env.GEMINI_API_KEY || "",
+  WEBHOOK_VERIFY_TOKEN: process.env.WEBHOOK_VERIFY_TOKEN || "PAPPI_VERIFY_2026"
+};

@@ -3,7 +3,7 @@ const ENV = require("../config/env");
 async function getCatalogText() {
   const base = ENV.CARDAPIOWEB_BASE_URL || "https://integracao.cardapioweb.com";
   const url = `${base}/api/partner/v1/catalog`;
-
+  
   if (!ENV.CARDAPIOWEB_TOKEN) return "Cardápio indisponível no momento.";
 
   try {

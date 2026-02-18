@@ -1,8 +1,8 @@
 const ENV = require("../config/env");
 
-async function changeOrderStatus(orderId, action) {
-    // URL de Produção conforme a documentação que você enviou
-    const url = `https://integracao.cardapioweb.com/api/partner/v1/orders/${orderId}/${action}`;
+async function createPrefilledOrder(orderData) {
+    // URL para criar o pedido pré-preenchido
+    const url = `https://integracao.cardapioweb.com/api/partner/v1/merchant/prefilled_order`;
     
     try {
         const response = await fetch(url, {
@@ -11,19 +11,30 @@ async function changeOrderStatus(orderId, action) {
                 "X-API-KEY": ENV.CARDAPIOWEB_TOKEN,
                 "Accept": "application/json",
                 "Content-Type": "application/json"
-            }
+            },
+            body: JSON.stringify(orderData)
         });
 
-        // O CardápioWeb retorna 204 quando dá tudo certo
-        if (response.status === 204) {
-            return { ok: true };
+        if (response.ok) {
+            return await response.json();
         }
         
-        const errorData = await response.json();
-        return { ok: false, error: errorData.message || "Erro desconhecido" };
+        const error = await response.json();
+        return { ok: false, error: error.message };
     } catch (e) {
         return { ok: false, error: e.message };
     }
 }
 
-module.exports = { changeOrderStatus };
+async function changeOrderStatus(orderId, action) {
+    const url = `https://integracao.cardapioweb.com/api/partner/v1/orders/${orderId}/${action}`;
+    try {
+        const response = await fetch(url, {
+            method: "POST",
+            headers: { "X-API-KEY": ENV.CARDAPIOWEB_TOKEN, "Accept": "application/json" }
+        });
+        return response.status === 204;
+    } catch (e) { return false; }
+}
+
+module.exports = { createPrefilledOrder, changeOrderStatus };

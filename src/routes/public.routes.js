@@ -660,6 +660,67 @@ router.post("/webhook", async (req, res) => {
         const af = getAF(from);
         const t = String(userText || "").trim();
 
+  // ✅ NÃO iniciar fluxo de endereço se não parecer endereço
+  // Ex: "quero pizza rápido quanto fica"
+  if (!looksLikeAddress(t) && af.step == null) {
+    // deixa o cérebro (IA) responder / conduzir pedido
+    // (não retorna aqui se você quiser continuar para a IA no final)
+  } else {
+
+    // CEP -> pergunta número
+    const cep = extractCep(t);
+    if (cep) {
+      af.cep = cep;
+      af.step = "ASK_NUMBER";
+      await sendText(from, "Perfeito ✅ Qual o *número* da casa?");
+      return;
+    }
+
+    // Se já está no fluxo guiado
+    if (af.step === "ASK_NUMBER") {
+      const n = extractHouseNumber(t);
+      if (!n) { await sendText(from, "Me diz só o *número* da casa 😊"); return; }
+      af.number = n;
+      af.step = "ASK_BAIRRO";
+      await sendText(from, "Boa! Qual o *bairro*?");
+      return;
+    }
+    if (af.step === "ASK_BAIRRO") {
+      af.bairro = t.slice(0, 80);
+      af.step = "ASK_COMPLEMENTO";
+      await sendText(from, "Tem *complemento*? Se não tiver, diga *sem*.");
+      return;
+    }
+    if (af.step === "ASK_COMPLEMENTO") {
+      af.complemento = looksLikeNoComplement(t) ? null : t.slice(0, 120);
+      af.step = null;
+
+      const full = buildAddressText(af);
+      const d2 = await quoteAny(full);
+      if (!d2?.ok) { await sendText(from, "Quase lá 😅 Manda *Rua + Número + Bairro* certinho?"); return; }
+
+      af.pending = { formatted: d2.formatted };
+      await askAddressConfirm(from, d2.formatted, d2);
+      return;
+    }
+
+    // Começa fluxo guiado se não conseguiu cotar
+    const num = extractHouseNumber(t);
+    if (!num) {
+      af.street = t.slice(0, 120);
+      af.step = "ASK_NUMBER";
+      await sendText(from, "Perfeito 🙌 Agora me diga o *número*.\nSe preferir, mande seu *CEP* ou *localização 📍*.");
+      return;
+    }
+
+    af.street = t.slice(0, 120);
+    af.number = num;
+    af.step = "ASK_BAIRRO";
+    await sendText(from, "Show! Qual é o *bairro*? 😊");
+    return;
+  }
+}
+
         // CEP -> pergunta número
         const cep = extractCep(t);
         if (cep) {

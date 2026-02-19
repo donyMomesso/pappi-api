@@ -830,8 +830,50 @@ ${upsell || "NENHUM"}
   }
 });
 
-module.exports = router;
-} catch (error) {
+const respostaIA = await geminiGenerate(content);
+let resposta = respostaIA;
+
+// ------------------------------------------------------------------
+// INTERCETAR GERADOR DE PIX E ENVIAR QR CODE (DENTRO DO TRY)
+// ------------------------------------------------------------------
+const pixMatch = resposta.match(/\[GERAR_PIX:(\d+\.\d{2})\]/);
+if (pixMatch) {
+  const valorTotal = parseFloat(pixMatch[1]);
+  resposta = resposta.replace(pixMatch[0], "").trim();
+
+  await sendText(from, resposta);
+
+  const txid = `PAPPI${Date.now()}`;
+  const pixData = await createPixCharge(txid, valorTotal, customer.name || "Cliente Pappi");
+
+  if (pixData && pixData.pixCopiaECola) {
+    await prisma.order.create({
+      data: {
+        displayId: txid,
+        status: "waiting_payment",
+        total: valorTotal,
+        items: "Pedido via WhatsApp",
+        customerId: customer.id,
+      },
+    });
+
+    const qrCodeUrl = `https://quickchart.io/qr?size=300&text=${encodeURIComponent(pixData.pixCopiaECola)}`;
+    await sendImage(from, qrCodeUrl, "📷 Aqui está o seu QR Code para pagamento!");
+    await sendText(from, `Ou use a chave Copia e Cola abaixo:\n\n${pixData.pixCopiaECola}`);
+  } else {
+    await sendText(from, "Oops! Tive um problema ao gerar o QR Code. Pode usar a nossa chave PIX tradicional: 19 9 8319 3999 😊");
+  }
+
+  pushHistory(from, "assistant", resposta);
+  return;
+}
+
+// se NÃO for pix, segue normal:
+pushHistory(from, "assistant", resposta);
+await sendText(from, resposta);
+
+
+  } catch (error) {
     console.error("🔥 Erro:", error);
     await sendText(
       from,
@@ -840,52 +882,19 @@ module.exports = router;
   }
 });
 
-
-// ------------------------------------------------------------------
-    // INTERCETAR GERADOR DE PIX E ENVIAR QR CODE
-    // ------------------------------------------------------------------
-    const pixMatch = resposta.match(/\[GERAR_PIX:(\d+\.\d{2})\]/);
-    if (pixMatch) {
-        const valorTotal = parseFloat(pixMatch[1]);
-        resposta = resposta.replace(pixMatch[0], "").trim(); 
-        
-        await sendText(from, resposta);
-
-        const txid = `PAPPI${Date.now()}`; 
-        const pixData = await createPixCharge(txid, valorTotal, customer.name || "Cliente Pappi");
-
-        if (pixData && pixData.pixCopiaECola) {
-            await prisma.order.create({
-                data: {
-                  displayId: txid,
-                  status: "waiting_payment",
-                  total: valorTotal,
-                  items: "Pedido via WhatsApp",
-                  customerId: customer.id
-                }
-            });
-
-            const qrCodeUrl = `https://quickchart.io/qr?size=300&text=${encodeURIComponent(pixData.pixCopiaECola)}`;
-            await sendImage(from, qrCodeUrl, "📷 Aqui está o seu QR Code para pagamento!");
-            await sendText(from, `Ou use a chave Copia e Cola abaixo:\n\n${pixData.pixCopiaECola}`);
-        } else {
-            await sendText(from, "Oops! Tive um problema ao gerar o QR Code. Pode usar a nossa chave PIX tradicional: 19 9 8319 3999 😊");
-        }
-        
-        pushHistory(from, "assistant", resposta);
-        return;
-    }
-
-    pushHistory(from, "assistant", resposta);
-    await sendText(from, resposta);
-
+module.exports = router;
   } catch (error) {
     console.error("🔥 Erro:", error);
-    await sendText(from, `Tive uma instabilidade rapidinha 😅🍕\nMe manda: seu pedido + se é entrega ou retirada.\nSe preferir, peça aqui:\n${LINK_CARDAPIO}`);
+    await sendText(
+      from,
+      `Tive uma instabilidade rapidinha 😅🍕\nMe manda: seu pedido + se é entrega ou retirada.\nSe preferir, peça aqui:\n${LINK_CARDAPIO}`
+    );
   }
 });
 
 module.exports = router;
+
+
 
 
 

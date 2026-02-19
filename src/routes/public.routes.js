@@ -1,12 +1,10 @@
 const express = require("express");
 const ENV = require("../config/env");
 const { PrismaClient } = require("@prisma/client");
-const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 const { loadRulesFromFiles } = require("../rules/loader");
 const { getMode } = require("../services/context.service");
 const { getUpsellHint } = require("../services/upsell.service");
-// CORREÇÃO AQUI: Nome exato do arquivo no seu sistema para não travar
 const { quoteDeliveryIfPossible, MAX_KM } = require("../services/deliveryQuote.service");
 
 const router = express.Router();
@@ -40,6 +38,7 @@ function getHistoryText(phone) {
   const h = chatHistory.get(phone) || [];
   return h.map((x) => (x.role === "user" ? `Cliente: ${x.text}` : `Atendente: ${x.text}`)).join("\n");
 }
+
 // ===============================
 // IA (Gemini) - auto resolve modelo via ListModels
 // ===============================
@@ -64,12 +63,8 @@ async function listGeminiModels() {
 }
 
 function pickGeminiModel(models) {
-  const supported = models.filter((m) =>
-    (m.supportedGenerationMethods || []).includes("generateContent")
-  );
+  const supported = models.filter((m) => (m.supportedGenerationMethods || []).includes("generateContent"));
 
-  // prioridade: usa ENV.GEMINI_MODEL se existir, senão tenta alguns comuns,
-  // senão pega o primeiro que suportar generateContent
   const preferred = [
     (ENV.GEMINI_MODEL || "").replace(/^models\//, ""),
     "gemini-2.5-flash",
@@ -82,7 +77,6 @@ function pickGeminiModel(models) {
     const found = supported.find((m) => m.name === full);
     if (found) return found.name;
   }
-
   return supported[0]?.name || null;
 }
 
@@ -91,19 +85,21 @@ async function ensureGeminiModel() {
 
   const models = await listGeminiModels();
   const picked = pickGeminiModel(models);
-
-  if (!picked) {
-    throw new Error("Nenhum modelo com generateContent disponível (ListModels não retornou suportados).");
-  }
+  if (!picked) throw new Error("Nenhum modelo com generateContent disponível (ListModels não retornou suportados).");
 
   cachedGeminiModel = picked;
   console.log("🤖 Gemini model selecionado:", cachedGeminiModel);
   return cachedGeminiModel;
 }
 
+// ✅ aceita string OU array de parts (áudio)
 async function geminiGenerate(content) {
   const apiKey = ENV.GEMINI_API_KEY || "";
   const model = await ensureGeminiModel();
+
+  const body = Array.isArray(content)
+    ? { contents: [{ parts: content }] }
+    : { contents: [{ parts: [{ text: String(content || "") }] }] };
 
   const resp = await fetch(`${GEMINI_API_BASE}/${model}:generateContent`, {
     method: "POST",
@@ -111,20 +107,13 @@ async function geminiGenerate(content) {
       "x-goog-api-key": apiKey,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: content }] }],
-    }),
+    body: JSON.stringify(body),
   });
 
   const data = await resp.json().catch(() => ({}));
-  if (!resp.ok) {
-    throw new Error(`generateContent failed: ${resp.status} ${JSON.stringify(data)}`);
-  }
+  if (!resp.ok) throw new Error(`generateContent failed: ${resp.status} ${JSON.stringify(data)}`);
 
-  return (
-    data?.candidates?.[0]?.content?.parts?.map((p) => p.text).filter(Boolean).join("") ||
-    ""
-  );
+  return data?.candidates?.[0]?.content?.parts?.map((p) => p.text).filter(Boolean).join("") || "";
 }
 
 // ===============================
@@ -190,6 +179,86 @@ async function askPaymentButtons(to) {
 }
 
 // ===============================
+// ADDRESS FLOW (GUIADO + CEP + GPS) por telefone
+// ===============================
+const addressFlow = new Map(); // phone -> { step, street, number, bairro, cep, complemento, pending, delivery }
+
+function getAF(phone) {
+  if (!addressFlow.has(phone)) addressFlow.set(phone, { step: null });
+  return addressFlow.get(phone);
+}
+function resetAF(phone) {
+  addressFlow.set(phone, { step: null });
+}
+
+function extractCep(text) {
+  const d = digitsOnly(text);
+  return d.length === 8 ? d : null;
+}
+function extractHouseNumber(text) {
+  const m = String(text || "").match(/\b\d{1,5}\b/);
+  return m ? m[0] : null;
+}
+function looksLikeNoComplement(text) {
+  return /^(sem|não tem|nao tem)\s*(complemento)?$/i.test(String(text || "").trim());
+}
+
+function buildAddressText(af) {
+  const parts = [];
+  if (af.street) parts.push(af.street);
+  if (af.number) parts.push(af.number);
+  if (af.bairro) parts.push(af.bairro);
+  if (af.cep) parts.push(`CEP ${af.cep}`);
+  if (af.complemento) parts.push(af.complemento);
+  return `${parts.join(" - ")}, Campinas - SP`;
+}
+
+// wrapper pra não quebrar caso sua deliveryQuote.service aceite (string) OU ({addressText})
+async function quoteAny(addressText) {
+  try {
+    return await quoteDeliveryIfPossible(addressText);
+  } catch {
+    return await quoteDeliveryIfPossible({ addressText });
+  }
+}
+
+// reverse geocode (GPS -> endereço)
+async function reverseGeocodeLatLng(lat, lng) {
+  if (!ENV.GOOGLE_MAPS_API_KEY) return null;
+
+  const url =
+    `https://maps.googleapis.com/maps/api/geocode/json?` +
+    `latlng=${lat},${lng}` +
+    `&key=${ENV.GOOGLE_MAPS_API_KEY}` +
+    `&language=pt-BR` +
+    `&result_type=street_address|premise|subpremise|route`;
+
+  const resp = await fetch(url).catch(() => null);
+  if (!resp) return null;
+
+  const data = await resp.json().catch(() => null);
+  return data?.results?.[0]?.formatted_address || null;
+}
+
+async function askAddressConfirm(to, formatted, delivery) {
+  const feeTxt = delivery?.fee != null ? `R$ ${Number(delivery.fee).toFixed(2)}` : "a confirmar";
+  const kmTxt = Number.isFinite(delivery?.km) ? `${delivery.km.toFixed(1)} km` : "";
+  const etaTxt = delivery?.etaMin != null ? `${delivery.etaMin} min` : "";
+
+  const txt =
+    `Achei este endereço 📍:\n*${formatted}*\n` +
+    `Taxa: *${feeTxt}*` +
+    `${kmTxt ? ` | ${kmTxt}` : ""}` +
+    `${etaTxt ? ` | ${etaTxt}` : ""}\n\n` +
+    `Está certo?`;
+
+  return sendButtons(to, txt, [
+    { id: "ADDR_CONFIRM", title: "✅ Confirmar" },
+    { id: "ADDR_CORRECT", title: "✏️ Corrigir" },
+  ]);
+}
+
+// ===============================
 // ÁUDIO: baixar do WhatsApp
 // ===============================
 async function downloadAudio(mediaId) {
@@ -247,12 +316,12 @@ Regras:
 - Se falar pix/cartão/dinheiro, capture payment.
 `.trim();
 
-  const content = [
+  const parts = [
     { text: PROMPT_AUDIO },
     { inlineData: { data: base64, mimeType: mimeType || "audio/ogg" } },
   ];
 
-  const raw = await geminiGenerate(content);
+  const raw = await geminiGenerate(parts);
 
   try {
     const clean = String(raw || "")
@@ -280,7 +349,7 @@ Regras:
 // CARDAPIOWEB
 // ===============================
 async function getMenu() {
-  const base = ENV.CARDAPIOWEB_BASE_URL || "[https://integracao.cardapioweb.com](https://integracao.cardapioweb.com)";
+  const base = ENV.CARDAPIOWEB_BASE_URL || "https://integracao.cardapioweb.com";
   const url = `${base}/api/partner/v1/catalog`;
 
   try {
@@ -313,7 +382,7 @@ async function getMenu() {
 }
 
 async function getMerchant() {
-  const base = ENV.CARDAPIOWEB_BASE_URL || "[https://integracao.cardapioweb.com](https://integracao.cardapioweb.com)";
+  const base = ENV.CARDAPIOWEB_BASE_URL || "https://integracao.cardapioweb.com";
   const url = `${base}/api/partner/v1/merchant`;
 
   try {
@@ -358,13 +427,11 @@ function normalizeAddress(merchant) {
 }
 
 // ===============================
-// EXTRAÇÃO SIMPLES - NOME ARRUMADO!
+// EXTRAÇÃO SIMPLES
 // ===============================
 function extractNameLight(text) {
   const t = String(text || "").trim();
-  // Só pega o nome se o cliente usar essas frases claras.
-  const m = t.match(/(?:meu nome é|aqui é o|aqui é a|sou o|sou a|me chamo)\s+([A-Za-zÀ-ÿ]+(?:\s+[A-Za-zÀ-ÿ]+){0,2})/i); 
-
+  const m = t.match(/(?:meu nome é|aqui é o|aqui é a|sou o|sou a|me chamo)\s+([A-Za-zÀ-ÿ]+(?:\s+[A-Za-zÀ-ÿ]+){0,2})/i);
   const name = m?.[1]?.trim();
   if (!name) return null;
   if (name.length < 2) return null;
@@ -429,9 +496,34 @@ router.post("/webhook", async (req, res) => {
         });
         pushHistory(from, "user", `BOTÃO: pagamento ${v}`);
       }
+
+      // ✅ Botões do endereço
+      if (btnId === "ADDR_CONFIRM") {
+        const af = getAF(from);
+        const formatted = af?.pending?.formatted || null;
+
+        if (formatted) {
+          await prisma.customer.update({
+            where: { phone: from },
+            data: { lastAddress: String(formatted).slice(0, 200), lastInteraction: new Date() },
+          }).catch(() => null);
+
+          pushHistory(from, "user", `ENDEREÇO CONFIRMADO: ${formatted}`);
+        }
+
+        resetAF(from);
+        await sendText(from, "Perfeito ✅ Endereço confirmado! Agora me diga seu pedido 🍕");
+        return;
+      }
+
+      if (btnId === "ADDR_CORRECT") {
+        resetAF(from);
+        await sendText(from, "Sem problema 😊 Me mande *Rua e Número* (ou seu *CEP* / sua *localização 📍*) pra eu calcular certinho.");
+        return;
+      }
     }
 
-    // 3) Entrada (texto ou áudio)
+    // 3) Entrada (texto, áudio, localização)
     let userText = "";
     let extracted = null;
 
@@ -441,12 +533,54 @@ router.post("/webhook", async (req, res) => {
         await sendText(from, "Puxa, não consegui ouvir esse áudio 😕 Pode escrever pra mim?");
         return;
       }
-
       extracted = await transcribeAndExtractFromAudio(audio.base64, audio.mimeType);
       userText = `ÁUDIO TRANSCRITO: ${extracted.transcription || ""}`.trim();
+
     } else if (msg.type === "text") {
       userText = msg.text?.body || "";
       if (!userText) return;
+
+    } else if (msg.type === "location") {
+      const lat = msg.location?.latitude;
+      const lng = msg.location?.longitude;
+
+      await prisma.customer.update({
+        where: { phone: from },
+        data: { lastInteraction: new Date() },
+      }).catch(() => null);
+
+      // Se mandou localização, assume entrega (se ainda não escolheu)
+      if (!customer.lastFulfillment) {
+        customer = await prisma.customer.update({
+          where: { phone: from },
+          data: { lastFulfillment: "entrega", lastInteraction: new Date() },
+        }).catch(() => customer);
+      }
+
+      if (!lat || !lng) {
+        await sendText(from, "Não consegui ler sua localização 😕 Pode mandar de novo?");
+        return;
+      }
+
+      const formatted = await reverseGeocodeLatLng(lat, lng);
+      if (!formatted) {
+        await sendText(from, "Não consegui transformar sua localização em endereço 😕\nPode mandar *Rua + Número + Bairro* ou seu *CEP*?");
+        return;
+      }
+
+      const deliveryGPS = await quoteAny(formatted);
+      if (!deliveryGPS?.ok) {
+        await sendText(from, "Quase lá 😅\nConfirma se sua localização está correta ou me manda *Rua + Número + Bairro* (ou *CEP*).");
+        return;
+      }
+
+      const af = getAF(from);
+      af.pending = { formatted, lat, lng };
+      af.delivery = deliveryGPS;
+
+      await askAddressConfirm(from, formatted, deliveryGPS);
+      return;
+
     } else if (msg.type === "interactive") {
       userText = "";
     } else {
@@ -458,6 +592,7 @@ router.post("/webhook", async (req, res) => {
       data: { lastInteraction: new Date() },
     }).catch(() => null);
 
+    // Atualiza dados simples via texto
     if (userText) {
       const nm = extractNameLight(userText);
       const ff = detectFulfillmentLight(userText);
@@ -476,6 +611,7 @@ router.post("/webhook", async (req, res) => {
       }
     }
 
+    // Atualiza dados extraídos do áudio
     if (extracted) {
       const dataToUpdate = {};
 
@@ -483,7 +619,6 @@ router.post("/webhook", async (req, res) => {
         const nm = String(extracted.customer_name).trim().slice(0, 60);
         if (nm.length >= 2) dataToUpdate.name = nm;
       }
-
       if (extracted.delivery_or_pickup) dataToUpdate.lastFulfillment = extracted.delivery_or_pickup;
       if (extracted.payment) dataToUpdate.preferredPayment = extracted.payment;
 
@@ -507,11 +642,66 @@ router.post("/webhook", async (req, res) => {
       return;
     }
 
+    // ===============================
+    // Address Flow: respostas por etapa (somente entrega)
+    // ===============================
+    if (customer.lastFulfillment === "entrega" && msg.type === "text") {
+      const af = getAF(from);
+      const t = String(userText || "").trim();
+
+      // CEP em qualquer momento
+      const cep = extractCep(t);
+      if (cep) {
+        af.cep = cep;
+        af.step = "ASK_NUMBER";
+        await sendText(from, "Perfeito ✅ Agora me diga o *número* da casa (ex: 120).");
+        return;
+      }
+
+      if (af.step === "ASK_NUMBER") {
+        const n = extractHouseNumber(t);
+        if (!n) {
+          await sendText(from, "Me diz só o *número* da casa 😊 (ex: 120)");
+          return;
+        }
+        af.number = n;
+        af.step = "ASK_BAIRRO";
+        await sendText(from, "Boa! Agora me diga o *bairro* 🙂");
+        return;
+      }
+
+      if (af.step === "ASK_BAIRRO") {
+        af.bairro = t.slice(0, 80);
+        af.step = "ASK_COMPLEMENTO";
+        await sendText(from, "Perfeito ✅ Tem *complemento*? (apto, bloco, referência). Se não tiver, diga *sem complemento*.");
+        return;
+      }
+
+      if (af.step === "ASK_COMPLEMENTO") {
+        af.complemento = looksLikeNoComplement(t) ? null : t.slice(0, 120);
+        af.step = null;
+
+        const full = buildAddressText(af);
+        const d2 = await quoteAny(full);
+
+        if (!d2?.ok) {
+          await sendText(from, "Quase lá 😅 Pode mandar *Rua + Número + Bairro* completo ou sua *localização 📍*?");
+          return;
+        }
+
+        af.pending = { formatted: d2.formatted };
+        af.delivery = d2;
+
+        await askAddressConfirm(from, d2.formatted, d2);
+        return;
+      }
+    }
+
     const addressCandidate = extracted?.address_text || userText || "";
     let delivery = null;
 
     if (customer.lastFulfillment === "entrega") {
-      delivery = await quoteDeliveryIfPossible(addressCandidate);
+      delivery = await quoteAny(addressCandidate);
 
       if (delivery?.ok && delivery.formatted) {
         await prisma.customer.update({
@@ -528,9 +718,41 @@ router.post("/webhook", async (req, res) => {
         return;
       }
 
+      // ✅ aqui entra o fluxo guiado (em vez de "não achei no mapa")
       if (!delivery?.ok) {
-        // MENSAGEM DO MAPA ARRUMADA
-        await sendText(from, "Hmm, não consegui achar esse endereço no mapa 🗺️.\nPor favor, envie o endereço completo com *Rua, Número e Bairro* para eu calcular a taxa certinho! 😊");
+        const af = getAF(from);
+
+        const cep = extractCep(addressCandidate);
+        if (cep) {
+          af.cep = cep;
+          af.step = "ASK_NUMBER";
+          await sendText(from, "Perfeito ✅ Agora me diga o *número* da casa (ex: 120).");
+          return;
+        }
+
+        const num = extractHouseNumber(addressCandidate);
+
+        // veio só rua (sem número)
+        if (!num) {
+          af.street = String(addressCandidate || "").trim().slice(0, 120);
+          af.step = "ASK_NUMBER";
+          await sendText(from, "Perfeito 🙌 Agora me diga o *número* da casa.\nSe preferir, mande seu *CEP* ou sua *localização 📍*.");
+          return;
+        }
+
+        // tem número, pedir bairro
+        if (!af.street) af.street = String(addressCandidate || "").trim().slice(0, 120);
+        af.number = num;
+
+        if (!af.bairro) {
+          af.step = "ASK_BAIRRO";
+          await sendText(from, "Show! Qual é o *bairro*? 😊");
+          return;
+        }
+
+        // já tem bairro → pedir complemento
+        af.step = "ASK_COMPLEMENTO";
+        await sendText(from, "Tem *complemento*? (apto, bloco, referência). Se não tiver, diga *sem complemento*.");
         return;
       }
     }
@@ -552,7 +774,7 @@ router.post("/webhook", async (req, res) => {
 
     const deliveryInternal =
       customer.lastFulfillment === "entrega" && delivery?.ok
-        ? `ENTREGA (interno): ${delivery.km.toFixed(1)} km | ETA ${delivery.eta_minutes ?? delivery.etaMin ?? "?"} min | taxa aprox ${delivery.delivery_fee ?? delivery.fee ?? "consultar"}`
+        ? `ENTREGA (interno): ${delivery.km?.toFixed?.(1) ?? "?"} km | ETA ${delivery.eta_minutes ?? delivery.etaMin ?? "?"} min | taxa aprox ${delivery.delivery_fee ?? delivery.fee ?? "consultar"}`
         : `ENTREGA (interno): não aplicável`;
 
     const PROMPT = `
@@ -568,7 +790,7 @@ REGRAS CRÍTICAS:
   - Entrega/Retirada: ${customer.lastFulfillment}
   - Pagamento: ${customer.preferredPayment}
 - Se for entrega:
-  - Se faltar endereço, pedir Rua + Número + Bairro.
+  - Se faltar endereço, pedir Rua + Número + Bairro ou CEP ou Localização.
   - Se estiver fora do raio, oferecer retirada.
 - Se cliente pedir sabores, resuma e sugira 2 campeãs do dia.
 - Sempre finalize com 1 pergunta clara.
@@ -609,3 +831,4 @@ ${upsell || "NENHUM"}
 });
 
 module.exports = router;
+```0

@@ -773,7 +773,6 @@ router.post("/webhook", async (req, res) => {
         await sendText(from, "Show! Qual é o *bairro*? 😊");
         return;
       }
-    }
 
     // 8) Cérebro (IA) com DISC + fala humana
     const [menu, merchant, configPix] = await Promise.all([

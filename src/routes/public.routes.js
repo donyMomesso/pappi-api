@@ -1,3 +1,4 @@
+// src/routes/public.routes.js
 const express = require("express");
 const ENV = require("../config/env");
 const { PrismaClient } = require("@prisma/client");
@@ -7,6 +8,9 @@ const { getMode } = require("../services/context.service");
 const { getUpsellHint } = require("../services/upsell.service");
 const { quoteDeliveryIfPossible, MAX_KM } = require("../services/deliveryQuote.service");
 const { createPixCharge } = require("../services/interPix.service");
+
+// Node 18+ tem fetch global. Se der erro no seu ambiente, descomente:
+// const fetch = (...args) => import("node-fetch").then(({ default: fetch }) => fetch(...args));
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -37,9 +41,53 @@ function pushHistory(phone, role, text) {
 }
 function getHistoryText(phone) {
   const h = chatHistory.get(phone) || [];
-  return h
-    .map((x) => (x.role === "user" ? `Cliente: ${x.text}` : `Atendente: ${x.text}`))
-    .join("\n");
+  return h.map((x) => (x.role === "user" ? `Cliente: ${x.text}` : `Atendente: ${x.text}`)).join("\n");
+}
+
+// ===============================
+// DISC (detecção leve + tom humano)
+// ===============================
+function detectDISC(historyText, userText) {
+  const t = `${historyText}\n${userText}`.toLowerCase();
+
+  const score = { D: 0, I: 0, S: 0, C: 0 };
+
+  // D: direto / urgência / comando
+  if (/(rápido|agora|urgente|pra ontem|resolve|quero logo|sem enrolar|objetivo|direto)/i.test(t)) score.D += 3;
+  if (/(quanto fica|valor|taxa|preço|total|fechou|manda)/i.test(t)) score.D += 2;
+
+  // I: animado / social / emojis / “top”
+  if (/(kkk|haha|top|show|amei|perfeito|manda aí|bora|😍|😂|🔥|👏)/i.test(t)) score.I += 3;
+  if (/(promo|novidade|qual recomenda|surpreende|capricha)/i.test(t)) score.I += 2;
+
+  // S: calmo / garantia / “tranquilo”
+  if (/(tranquilo|de boa|sem pressa|tanto faz|pode ser|confio|obrigado|valeu)/i.test(t)) score.S += 3;
+  if (/(família|criança|pra todo mundo|clássica)/i.test(t)) score.S += 1;
+
+  // C: detalhista / regras / confirmação / “certinho”
+  if (/(detalhe|certinho|confirma|comprovante|conforme|tamanho|ingrediente|sem|com|meio a meio|observação)/i.test(t)) score.C += 3;
+  if (/(cep|número|bairro|endereço|nota|troco|cartão|pix)/i.test(t)) score.C += 2;
+
+  let best = "S";
+  let bestVal = -1;
+  for (const k of ["D", "I", "S", "C"]) {
+    if (score[k] > bestVal) { bestVal = score[k]; best = k; }
+  }
+  return best; // D | I | S | C
+}
+
+function discToneGuidance(disc) {
+  switch (disc) {
+    case "D":
+      return `Tom: direto, rápido, sem rodeio. Frases curtas. 1 pergunta por vez. Sem emojis em excesso (máx 1).`;
+    case "I":
+      return `Tom: animado e caloroso. Pode usar 1–2 emojis. Sugira 1 recomendação.`;
+    case "C":
+      return `Tom: bem claro e organizado. Confirme detalhes (tamanho, sabores, endereço). Sem “textão”.`;
+    case "S":
+    default:
+      return `Tom: acolhedor e tranquilo. Passe segurança. Pergunte 1 coisa por vez.`;
+  }
 }
 
 // ===============================
@@ -60,7 +108,6 @@ async function listGeminiModels() {
     const txt = await resp.text().catch(() => "");
     throw new Error(`ListModels failed: ${resp.status} ${txt}`);
   }
-
   const data = await resp.json();
   return data.models || [];
 }
@@ -95,7 +142,6 @@ async function ensureGeminiModel() {
   return cachedGeminiModel;
 }
 
-// aceita string OU array de parts (áudio)
 async function geminiGenerate(content) {
   const apiKey = ENV.GEMINI_API_KEY || "";
   const model = await ensureGeminiModel();
@@ -117,10 +163,7 @@ async function geminiGenerate(content) {
   if (!resp.ok) throw new Error(`generateContent failed: ${resp.status} ${JSON.stringify(data)}`);
 
   return (
-    data?.candidates?.[0]?.content?.parts
-      ?.map((p) => p.text)
-      .filter(Boolean)
-      .join("") || ""
+    data?.candidates?.[0]?.content?.parts?.map((p) => p.text).filter(Boolean).join("") || ""
   );
 }
 
@@ -181,14 +224,14 @@ async function sendButtons(to, bodyText, buttons) {
 }
 
 async function askFulfillmentButtons(to) {
-  return sendButtons(to, "Entrega ou Retirada? 😊", [
+  return sendButtons(to, "Pra agilizar 😊 é *Entrega* ou *Retirada*?", [
     { id: "FULFILLMENT_ENTREGA", title: "🚚 Entrega" },
     { id: "FULFILLMENT_RETIRADA", title: "🏪 Retirada" },
   ]);
 }
 
 async function askPaymentButtons(to) {
-  return sendButtons(to, "Pagamento? 💳", [
+  return sendButtons(to, "E o pagamento vai ser como? 💳", [
     { id: "PAY_PIX", title: "⚡ PIX" },
     { id: "PAY_CARTAO", title: "💳 Cartão" },
     { id: "PAY_DINHEIRO", title: "💵 Dinheiro" },
@@ -230,7 +273,6 @@ function buildAddressText(af) {
   return `${parts.join(" - ")}, Campinas - SP`;
 }
 
-// wrapper pra não quebrar caso sua deliveryQuote.service aceite (string) OU ({addressText})
 async function quoteAny(addressText) {
   try {
     return await quoteDeliveryIfPossible(addressText);
@@ -239,7 +281,6 @@ async function quoteAny(addressText) {
   }
 }
 
-// reverse geocode (GPS -> endereço)
 async function reverseGeocodeLatLng(lat, lng) {
   if (!ENV.GOOGLE_MAPS_API_KEY) return null;
 
@@ -274,9 +315,7 @@ async function askAddressConfirm(to, formatted, delivery) {
 function extractNameLight(text) {
   const t = String(text || "").trim();
 
-  // Se a pessoa mandar "Alex Junior" (só nome), salva.
   if (/^[A-Za-zÀ-ÿ]+(?:\s+[A-Za-zÀ-ÿ]+){0,2}$/.test(t) && t.length >= 2) {
-    // evita capturar "sim", "não", "ok" etc
     if (/^(sim|nao|não|ok|blz|beleza|oi|ola|olá)$/i.test(t)) return null;
     return t.slice(0, 60);
   }
@@ -314,7 +353,7 @@ function shouldAskName(phone, customer) {
 }
 
 // ===============================
-// CARDAPIOWEB (você pode manter seu getMenu/getMerchant completos)
+// CARDAPIOWEB
 // ===============================
 async function getMenu() {
   const base = ENV.CARDAPIOWEB_BASE_URL || "https://integracao.cardapioweb.com";
@@ -328,7 +367,7 @@ async function getMenu() {
     const data = await resp.json();
     if (!data?.categories) return "Cardápio indisponível.";
 
-    let txt = "🍕 MENU:\n";
+    let txt = "🍕 MENU PAPPI:\n";
     data.categories.forEach((cat) => {
       if (cat?.status === "ACTIVE") {
         txt += `\n${String(cat.name || "CATEGORIA").toUpperCase()}\n`;
@@ -474,12 +513,10 @@ router.post("/webhook", async (req, res) => {
         const formatted = af?.pending?.formatted || null;
 
         if (formatted) {
-          await prisma.customer
-            .update({
-              where: { phone: from },
-              data: { lastAddress: String(formatted).slice(0, 200), lastInteraction: new Date() },
-            })
-            .catch(() => null);
+          await prisma.customer.update({
+            where: { phone: from },
+            data: { lastAddress: String(formatted).slice(0, 200), lastInteraction: new Date() },
+          }).catch(() => null);
 
           pushHistory(from, "user", `ENDEREÇO CONFIRMADO: ${formatted}`);
         }
@@ -494,9 +531,11 @@ router.post("/webhook", async (req, res) => {
         await sendText(from, "Me manda *CEP* ou *Rua + Número + Bairro* (ou sua localização 📍).");
         return;
       }
+
+      // Botão não reconhecido: segue fluxo normal (sem travar)
     }
 
-    // 2) Entrada (texto ou localização) — áudio você pode plugar depois
+    // 2) Entrada (texto ou localização)
     let userText = "";
 
     if (msg.type === "text") {
@@ -511,19 +550,16 @@ router.post("/webhook", async (req, res) => {
         return;
       }
 
-      // assume entrega se não escolheu ainda
       if (!customer.lastFulfillment) {
-        customer = await prisma.customer
-          .update({
-            where: { phone: from },
-            data: { lastFulfillment: "entrega", lastInteraction: new Date() },
-          })
-          .catch(() => customer);
+        customer = await prisma.customer.update({
+          where: { phone: from },
+          data: { lastFulfillment: "entrega", lastInteraction: new Date() },
+        }).catch(() => customer);
       }
 
       const formatted = await reverseGeocodeLatLng(lat, lng);
       if (!formatted) {
-        await sendText(from, "Não consegui achar no mapa 😕 Manda *Rua + Número + Bairro* ou *CEP*.");
+        await sendText(from, "Não achei no mapa 😕 Manda *Rua + Número + Bairro* ou *CEP*.");
         return;
       }
 
@@ -556,14 +592,14 @@ router.post("/webhook", async (req, res) => {
     if (ff) dataToUpdate.lastFulfillment = ff;
     if (pay) dataToUpdate.preferredPayment = pay;
 
-    customer = await prisma.customer
-      .update({ where: { phone: from }, data: dataToUpdate })
-      .catch(() => customer);
-
+    customer = await prisma.customer.update({ where: { phone: from }, data: dataToUpdate }).catch(() => customer);
     pushHistory(from, "user", userText);
 
-    // 4) Pergunta nome 1x (pra pegar quem só manda "sim/oi")
-    if (shouldAskName(from, customer) && /^(oi|olá|ola|sim|boa|boa noite|bom dia|boa tarde)$/i.test(userText.trim())) {
+    // 4) Pergunta nome 1x (pra pegar quem só manda "oi/sim")
+    if (
+      shouldAskName(from, customer) &&
+      /^(oi|olá|ola|sim|boa|boa noite|bom dia|boa tarde)$/i.test(userText.trim())
+    ) {
       await sendText(from, "Pra eu te atender certinho 😊 qual seu nome?");
       return;
     }
@@ -580,21 +616,19 @@ router.post("/webhook", async (req, res) => {
       return;
     }
 
-    // 7) Endereço (só se entrega) — sem textão
+    // 7) Endereço (só se entrega)
     let delivery = null;
     if (customer.lastFulfillment === "entrega") {
-      // se já tem lastAddress e a pessoa só está “continuando”, não precisa pedir sempre
-      const candidate = userText;
+      const candidate = customer.lastAddress || userText;
 
+      // se ele já tem lastAddress, tenta cotar com ele primeiro
       delivery = await quoteAny(candidate);
 
-      if (delivery?.ok && delivery.formatted) {
-        await prisma.customer
-          .update({
-            where: { phone: from },
-            data: { lastAddress: String(delivery.formatted).slice(0, 200) },
-          })
-          .catch(() => null);
+      if (delivery?.ok && delivery.formatted && !customer.lastAddress) {
+        await prisma.customer.update({
+          where: { phone: from },
+          data: { lastAddress: String(delivery.formatted).slice(0, 200) },
+        }).catch(() => null);
       }
 
       if (delivery?.ok && delivery.within === false) {
@@ -603,41 +637,64 @@ router.post("/webhook", async (req, res) => {
       }
 
       if (!delivery?.ok) {
-        // inicia fluxo guiado curto
         const af = getAF(from);
+        const t = String(userText || "").trim();
 
-        const cep = extractCep(candidate);
+        // CEP -> pergunta número
+        const cep = extractCep(t);
         if (cep) {
           af.cep = cep;
           af.step = "ASK_NUMBER";
-          await sendText(from, "Qual o *número* da casa?");
+          await sendText(from, "Perfeito ✅ Qual o *número* da casa?");
           return;
         }
 
-        const num = extractHouseNumber(candidate);
-        if (!num) {
-          af.street = candidate.slice(0, 120);
-          af.step = "ASK_NUMBER";
-          await sendText(from, "Me diz o *número* da casa 😊 (ou manda *CEP* / localização 📍)");
-          return;
-        }
-
-        if (!af.street) af.street = candidate.slice(0, 120);
-        af.number = num;
-
-        if (!af.bairro) {
+        // Se já está no fluxo guiado
+        if (af.step === "ASK_NUMBER") {
+          const n = extractHouseNumber(t);
+          if (!n) { await sendText(from, "Me diz só o *número* da casa 😊"); return; }
+          af.number = n;
           af.step = "ASK_BAIRRO";
-          await sendText(from, "Qual o *bairro*?");
+          await sendText(from, "Boa! Qual o *bairro*?");
+          return;
+        }
+        if (af.step === "ASK_BAIRRO") {
+          af.bairro = t.slice(0, 80);
+          af.step = "ASK_COMPLEMENTO";
+          await sendText(from, "Tem *complemento*? Se não tiver, diga *sem*.");
+          return;
+        }
+        if (af.step === "ASK_COMPLEMENTO") {
+          af.complemento = looksLikeNoComplement(t) ? null : t.slice(0, 120);
+          af.step = null;
+
+          const full = buildAddressText(af);
+          const d2 = await quoteAny(full);
+          if (!d2?.ok) { await sendText(from, "Quase lá 😅 Manda *Rua + Número + Bairro* certinho?"); return; }
+
+          af.pending = { formatted: d2.formatted };
+          await askAddressConfirm(from, d2.formatted, d2);
           return;
         }
 
-        af.step = "ASK_COMPLEMENTO";
-        await sendText(from, "Tem *complemento*? Se não, diga *sem*.");
+        // Começa fluxo guiado se não conseguiu cotar
+        const num = extractHouseNumber(t);
+        if (!num) {
+          af.street = t.slice(0, 120);
+          af.step = "ASK_NUMBER";
+          await sendText(from, "Perfeito 🙌 Agora me diga o *número*.\nSe preferir, mande seu *CEP* ou *localização 📍*.");
+          return;
+        }
+
+        af.street = t.slice(0, 120);
+        af.number = num;
+        af.step = "ASK_BAIRRO";
+        await sendText(from, "Show! Qual é o *bairro*? 😊");
         return;
       }
     }
 
-    // 8) Cérebro (IA)
+    // 8) Cérebro (IA) com DISC + fala humana
     const [menu, merchant, configPix] = await Promise.all([
       getMenu(),
       getMerchant(),
@@ -653,18 +710,21 @@ router.post("/webhook", async (req, res) => {
     const historyText = getHistoryText(from);
     const upsell = getUpsellHint({ historyText, userText });
 
+    const disc = detectDISC(historyText, userText);
+    const tone = discToneGuidance(disc);
+
     const deliveryInternal =
       customer.lastFulfillment === "entrega" && delivery?.ok
         ? `ENTREGA (interno): ${delivery.km?.toFixed?.(1) ?? "?"} km | taxa ${delivery.fee ?? "?"}`
         : `ENTREGA (interno): não aplicável`;
 
     const PROMPT = `
-Você é o atendente virtual da Pappi Pizza (Campinas-SP).
-Tom: simpático, rápido e objetivo. Sem textão.
+Você atende como humano da Pappi Pizza (Campinas-SP). Não diga que é robô/IA.
+Fale natural, sem frases repetidas. Nada de “sou um assistente virtual”.
+${tone}
 
 REGRAS CRÍTICAS:
 - NUNCA diga: "VIP", "modo", "evento", "interno", "Google", "Maps".
-- Se não souber o nome, pergunte 1x (depois pare).
 - Já sabemos:
   - Nome: ${customer.name || "desconhecido"}
   - Entrega/Retirada: ${customer.lastFulfillment}
@@ -704,13 +764,12 @@ ${upsell || "NENHUM"}
     const content = `${PROMPT}\n\nCliente: ${userText}\nAtendente:`;
     let resposta = await geminiGenerate(content);
 
-    // 9) PIX INTERCEPT (sempre dentro do webhook)
+    // 9) PIX INTERCEPT
     const pixMatch = resposta.match(/\[GERAR_PIX:(\d+\.\d{2})\]/);
     if (pixMatch) {
       const valorTotal = parseFloat(pixMatch[1]);
       resposta = resposta.replace(pixMatch[0], "").trim();
 
-      // manda texto “normal”
       if (resposta) await sendText(from, resposta);
 
       const txid = `PAPPI${Date.now()}`;
@@ -727,10 +786,7 @@ ${upsell || "NENHUM"}
           },
         });
 
-        const qrCodeUrl = `https://quickchart.io/qr?size=300&text=${encodeURIComponent(
-          pixData.pixCopiaECola
-        )}`;
-
+        const qrCodeUrl = `https://quickchart.io/qr?size=300&text=${encodeURIComponent(pixData.pixCopiaECola)}`;
         await sendImage(from, qrCodeUrl, "QR Code PIX ✅");
         await sendText(from, `Copia e Cola:\n${pixData.pixCopiaECola}`);
       } else {

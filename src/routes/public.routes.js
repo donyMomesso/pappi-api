@@ -237,6 +237,27 @@ async function askPaymentButtons(to) {
     { id: "PAY_DINHEIRO", title: "💵 Dinheiro" },
   ]);
 }
+function looksLikeAddress(text) {
+  const t = String(text || "").toLowerCase().trim();
+  if (!t) return false;
+
+  // CEP
+  if (extractCep(t)) return true;
+
+  // Palavras que indicam endereço
+  const hasStreetWord = /(rua|r\.|avenida|av\.|travessa|tv\.|alameda|rodovia|estrada|praça|praca|bairro|nº|n\.)/i.test(t);
+
+  // Padrão tipo "Rua X, 123" / "Rua X 123" / contém vírgula e número
+  const hasNumber = /\b\d{1,5}\b/.test(t);
+  const hasCommaNumber = /,?\s*\d{1,5}\b/.test(t);
+
+  // Evita acionar com frases de intenção (pizza/preço/rápido/quanto)
+  const isIntentPhrase = /(pizza|quanto|preço|preco|rápido|rapido|valor|card[aá]pio|menu|promo)/i.test(t);
+
+  if (isIntentPhrase && !hasStreetWord) return false;
+
+  return (hasStreetWord && hasNumber) || (hasCommaNumber && hasStreetWord) || (hasStreetWord && t.length >= 10);
+}
 
 // ===============================
 // ADDRESS FLOW (GUIADO + CEP + GPS) por telefone
@@ -262,7 +283,6 @@ function extractHouseNumber(text) {
 function looksLikeNoComplement(text) {
   return /^(sem|não tem|nao tem)\s*(complemento)?$/i.test(String(text || "").trim());
 }
-
 function buildAddressText(af) {
   const parts = [];
   if (af.street) parts.push(af.street);

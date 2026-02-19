@@ -18,10 +18,8 @@ router.post("/rules", guard, async (req, res) => {
     const { mode, text } = req.body || {};
     if (!text) return res.status(400).json({ error: "text obrigatório" });
 
-    // mode: BASE | VIP | EVENT
     const m = String(mode || "BASE").toUpperCase();
 
-    // prisma vem do app (injeção simples)
     const prisma = req.app.get("prisma");
     const saved = await saveRules({ prisma, mode: m, text });
 

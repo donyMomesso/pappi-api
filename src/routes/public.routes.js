@@ -831,7 +831,6 @@ ${upsell || "NENHUM"}
 });
 
 module.exports = router;
-```0
 } catch (error) {
     console.error("🔥 Erro:", error);
     await sendText(

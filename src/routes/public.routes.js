@@ -14,7 +14,7 @@ const prisma = new PrismaClient();
 const LINK_CARDAPIO = "https://pappipizza.cardapioweb.com";
 
 // ===============================
-// Anti-duplicação
+// Anti-duplicação (WhatsApp pode reenviar)
 // ===============================
 const processedMsgIds = new Set();
 function alreadyProcessed(id) {
@@ -26,7 +26,7 @@ function alreadyProcessed(id) {
 }
 
 // ===============================
-// Memória curta
+// Memória curta por telefone (últimas 10 falas)
 // ===============================
 const chatHistory = new Map();
 function pushHistory(phone, role, text) {
@@ -37,11 +37,13 @@ function pushHistory(phone, role, text) {
 }
 function getHistoryText(phone) {
   const h = chatHistory.get(phone) || [];
-  return h.map((x) => (x.role === "user" ? `Cliente: ${x.text}` : `Atendente: ${x.text}`)).join("\n");
+  return h
+    .map((x) => (x.role === "user" ? `Cliente: ${x.text}` : `Atendente: ${x.text}`))
+    .join("\n");
 }
 
 // ===============================
-// IA (Gemini via fetch)
+// IA (Gemini) - auto resolve modelo via ListModels
 // ===============================
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
 let cachedGeminiModel = null;
@@ -64,7 +66,9 @@ async function listGeminiModels() {
 }
 
 function pickGeminiModel(models) {
-  const supported = models.filter((m) => (m.supportedGenerationMethods || []).includes("generateContent"));
+  const supported = models.filter((m) =>
+    (m.supportedGenerationMethods || []).includes("generateContent")
+  );
 
   const preferred = [
     (ENV.GEMINI_MODEL || "").replace(/^models\//, ""),
@@ -87,10 +91,11 @@ async function ensureGeminiModel() {
   const picked = pickGeminiModel(models);
   if (!picked) throw new Error("Nenhum modelo com generateContent disponível.");
   cachedGeminiModel = picked;
-  console.log("🤖 Gemini model:", cachedGeminiModel);
+  console.log("🤖 Gemini model selecionado:", cachedGeminiModel);
   return cachedGeminiModel;
 }
 
+// aceita string OU array de parts (áudio)
 async function geminiGenerate(content) {
   const apiKey = ENV.GEMINI_API_KEY || "";
   const model = await ensureGeminiModel();
@@ -112,20 +117,25 @@ async function geminiGenerate(content) {
   if (!resp.ok) throw new Error(`generateContent failed: ${resp.status} ${JSON.stringify(data)}`);
 
   return (
-    data?.candidates?.[0]?.content?.parts?.map((p) => p.text).filter(Boolean).join("") || ""
+    data?.candidates?.[0]?.content?.parts
+      ?.map((p) => p.text)
+      .filter(Boolean)
+      .join("") || ""
   );
 }
 
 // ===============================
-// HELPERS WHATSAPP
+// HELPERS (WHATSAPP)
 // ===============================
 function digitsOnly(str) {
   return String(str || "").replace(/\D/g, "");
 }
 
 async function waSend(payload) {
-  if (!ENV.WHATSAPP_TOKEN || !ENV.WHATSAPP_PHONE_NUMBER_ID) return;
-
+  if (!ENV.WHATSAPP_TOKEN || !ENV.WHATSAPP_PHONE_NUMBER_ID) {
+    console.error("❌ WHATSAPP_TOKEN ou WHATSAPP_PHONE_NUMBER_ID não configurado.");
+    return;
+  }
   const url = `https://graph.facebook.com/v24.0/${ENV.WHATSAPP_PHONE_NUMBER_ID}/messages`;
   await fetch(url, {
     method: "POST",
@@ -148,7 +158,7 @@ async function sendImage(to, imageUrl, caption) {
     messaging_product: "whatsapp",
     to: digitsOnly(to),
     type: "image",
-    image: { link: imageUrl, caption: caption ? String(caption).slice(0, 900) : undefined },
+    image: { link: imageUrl, caption: caption ? String(caption).slice(0, 1000) : undefined },
   });
 }
 
@@ -159,7 +169,7 @@ async function sendButtons(to, bodyText, buttons) {
     type: "interactive",
     interactive: {
       type: "button",
-      body: { text: String(bodyText || "").slice(0, 900) },
+      body: { text: bodyText },
       action: {
         buttons: buttons.slice(0, 3).map((b) => ({
           type: "reply",
@@ -171,14 +181,14 @@ async function sendButtons(to, bodyText, buttons) {
 }
 
 async function askFulfillmentButtons(to) {
-  return sendButtons(to, "Pra agilizar 😊 é *Entrega* ou *Retirada*?", [
+  return sendButtons(to, "Entrega ou Retirada? 😊", [
     { id: "FULFILLMENT_ENTREGA", title: "🚚 Entrega" },
     { id: "FULFILLMENT_RETIRADA", title: "🏪 Retirada" },
   ]);
 }
 
 async function askPaymentButtons(to) {
-  return sendButtons(to, "Pagamento vai ser como? 💳", [
+  return sendButtons(to, "Pagamento? 💳", [
     { id: "PAY_PIX", title: "⚡ PIX" },
     { id: "PAY_CARTAO", title: "💳 Cartão" },
     { id: "PAY_DINHEIRO", title: "💵 Dinheiro" },
@@ -186,56 +196,10 @@ async function askPaymentButtons(to) {
 }
 
 // ===============================
-// Nome rápido + confirmação
-// ===============================
-const pendingName = new Map(); // phone -> nameGuess
-
-function extractNameLight(text) {
-  const t = String(text || "").trim();
-  const m = t.match(
-    /(?:meu nome é|aqui é o|aqui é a|sou o|sou a|me chamo)\s+([A-Za-zÀ-ÿ]+(?:\s+[A-Za-zÀ-ÿ]+){0,2})/i
-  );
-  const name = m?.[1]?.trim();
-  if (!name || name.length < 2) return null;
-  return name.slice(0, 60);
-}
-
-function looksLikeJustAName(text) {
-  const t = String(text || "").trim();
-  if (t.length < 2 || t.length > 40) return false;
-  if (/\d/.test(t)) return false;
-  if (/[#@/\\:*+=<>]/.test(t)) return false;
-  if (/\b(pizza|lasanha|entrega|retirada|pix|cart[aã]o|dinheiro|rua|av|avenida|bairro|cep)\b/i.test(t)) return false;
-  if (!/^[A-Za-zÀ-ÿ\s]+$/.test(t)) return false;
-
-  const parts = t.split(/\s+/).filter(Boolean);
-  if (parts.length < 1 || parts.length > 3) return false;
-
-  const hasVowel = /[aeiouáàâãéêíóôõú]/i.test(t);
-  if (!hasVowel) return false;
-
-  return true;
-}
-
-function detectFulfillmentLight(text) {
-  const t = String(text || "").toLowerCase();
-  if (/retirada|retirar|balc[aã]o|vou buscar/i.test(t)) return "retirada";
-  if (/entrega|delivery|entregar/i.test(t)) return "entrega";
-  return null;
-}
-
-function detectPaymentLight(text) {
-  const t = String(text || "").toLowerCase();
-  if (/pix/i.test(t)) return "pix";
-  if (/cart[aã]o|credito|d[eé]bito/i.test(t)) return "cartao";
-  if (/dinheiro|troco/i.test(t)) return "dinheiro";
-  return null;
-}
-
-// ===============================
-// ADDRESS FLOW
+// ADDRESS FLOW (GUIADO + CEP + GPS) por telefone
 // ===============================
 const addressFlow = new Map(); // phone -> { step, street, number, bairro, cep, complemento, pending, delivery }
+
 function getAF(phone) {
   if (!addressFlow.has(phone)) addressFlow.set(phone, { step: null });
   return addressFlow.get(phone);
@@ -266,6 +230,7 @@ function buildAddressText(af) {
   return `${parts.join(" - ")}, Campinas - SP`;
 }
 
+// wrapper pra não quebrar caso sua deliveryQuote.service aceite (string) OU ({addressText})
 async function quoteAny(addressText) {
   try {
     return await quoteDeliveryIfPossible(addressText);
@@ -274,6 +239,7 @@ async function quoteAny(addressText) {
   }
 }
 
+// reverse geocode (GPS -> endereço)
 async function reverseGeocodeLatLng(lat, lng) {
   if (!ENV.GOOGLE_MAPS_API_KEY) return null;
 
@@ -294,14 +260,7 @@ async function reverseGeocodeLatLng(lat, lng) {
 async function askAddressConfirm(to, formatted, delivery) {
   const feeTxt = delivery?.fee != null ? `R$ ${Number(delivery.fee).toFixed(2)}` : "a confirmar";
   const kmTxt = Number.isFinite(delivery?.km) ? `${delivery.km.toFixed(1)} km` : "";
-  const etaTxt = delivery?.etaMin != null ? `${delivery.etaMin} min` : "";
-
-  const txt =
-    `Achei este endereço 📍:\n*${formatted}*\n` +
-    `Taxa: *${feeTxt}*` +
-    `${kmTxt ? ` | ${kmTxt}` : ""}` +
-    `${etaTxt ? ` | ${etaTxt}` : ""}\n\n` +
-    `Está certo?`;
+  const txt = `Confere o endereço? 📍\n*${formatted}*\nTaxa: *${feeTxt}*${kmTxt ? ` | ${kmTxt}` : ""}`;
 
   return sendButtons(to, txt, [
     { id: "ADDR_CONFIRM", title: "✅ Confirmar" },
@@ -310,78 +269,97 @@ async function askAddressConfirm(to, formatted, delivery) {
 }
 
 // ===============================
-// ÁUDIO
+// EXTRAÇÃO SIMPLES (nome, envio, pagamento)
 // ===============================
-async function downloadAudio(mediaId) {
+function extractNameLight(text) {
+  const t = String(text || "").trim();
+
+  // Se a pessoa mandar "Alex Junior" (só nome), salva.
+  if (/^[A-Za-zÀ-ÿ]+(?:\s+[A-Za-zÀ-ÿ]+){0,2}$/.test(t) && t.length >= 2) {
+    // evita capturar "sim", "não", "ok" etc
+    if (/^(sim|nao|não|ok|blz|beleza|oi|ola|olá)$/i.test(t)) return null;
+    return t.slice(0, 60);
+  }
+
+  const m = t.match(
+    /(?:meu nome é|aqui é o|aqui é a|sou o|sou a|me chamo)\s+([A-Za-zÀ-ÿ]+(?:\s+[A-Za-zÀ-ÿ]+){0,2})/i
+  );
+  const name = m?.[1]?.trim();
+  if (!name || name.length < 2) return null;
+  return name.slice(0, 60);
+}
+
+function detectFulfillmentLight(text) {
+  const t = String(text || "").toLowerCase();
+  if (/retirada|retirar|balc[aã]o|vou buscar/i.test(t)) return "retirada";
+  if (/entrega|delivery|entregar/i.test(t)) return "entrega";
+  return null;
+}
+
+function detectPaymentLight(text) {
+  const t = String(text || "").toLowerCase();
+  if (/pix/i.test(t)) return "pix";
+  if (/cart[aã]o|credito|crédito|d[eé]bito/i.test(t)) return "cartao";
+  if (/dinheiro|troco/i.test(t)) return "dinheiro";
+  return null;
+}
+
+// Pergunta nome só 1x por sessão
+const askedName = new Set();
+function shouldAskName(phone, customer) {
+  if (customer?.name) return false;
+  if (askedName.has(phone)) return false;
+  askedName.add(phone);
+  return true;
+}
+
+// ===============================
+// CARDAPIOWEB (você pode manter seu getMenu/getMerchant completos)
+// ===============================
+async function getMenu() {
+  const base = ENV.CARDAPIOWEB_BASE_URL || "https://integracao.cardapioweb.com";
+  const url = `${base}/api/partner/v1/catalog`;
+
   try {
-    if (!ENV.WHATSAPP_TOKEN) return null;
-
-    const metaResp = await fetch(`https://graph.facebook.com/v24.0/${mediaId}`, {
-      headers: { Authorization: `Bearer ${ENV.WHATSAPP_TOKEN}` },
+    const resp = await fetch(url, {
+      headers: { "X-API-KEY": ENV.CARDAPIOWEB_TOKEN, Accept: "application/json" },
     });
 
-    const meta = await metaResp.json();
-    if (!meta?.url) return null;
+    const data = await resp.json();
+    if (!data?.categories) return "Cardápio indisponível.";
 
-    const mediaResp = await fetch(meta.url, {
-      headers: { Authorization: `Bearer ${ENV.WHATSAPP_TOKEN}` },
+    let txt = "🍕 MENU:\n";
+    data.categories.forEach((cat) => {
+      if (cat?.status === "ACTIVE") {
+        txt += `\n${String(cat.name || "CATEGORIA").toUpperCase()}\n`;
+        (cat.items || []).forEach((i) => {
+          if (i?.status === "ACTIVE") {
+            const price = Number(i.price);
+            const priceTxt = Number.isFinite(price) ? price.toFixed(2) : "0.00";
+            txt += `- ${i.name} (R$ ${priceTxt})\n`;
+          }
+        });
+      }
     });
 
-    const mimeType = mediaResp.headers.get("content-type") || "audio/ogg";
-    const buffer = await mediaResp.arrayBuffer();
-    return { base64: Buffer.from(buffer).toString("base64"), mimeType };
+    return txt.trim();
   } catch (e) {
-    console.error("❌ downloadAudio:", e?.message || e);
-    return null;
+    console.error("❌ getMenu erro:", e?.message || e);
+    return "Cardápio indisponível.";
   }
 }
 
-async function transcribeAndExtractFromAudio(base64, mimeType) {
-  const PROMPT_AUDIO = `
-Você é atendente da Pappi Pizza.
-TRANSCRAVE o áudio e EXTRAIA campos, sem inventar.
-
-Responda SOMENTE JSON válido:
-{
-  "transcription": "...",
-  "customer_name": "..."|null,
-  "delivery_or_pickup": "entrega"|"retirada"|null,
-  "address_text": "..."|null,
-  "payment": "pix"|"cartao"|"dinheiro"|null
-}
-`.trim();
-
-  const parts = [
-    { text: PROMPT_AUDIO },
-    { inlineData: { data: base64, mimeType: mimeType || "audio/ogg" } },
-  ];
-
-  const raw = await geminiGenerate(parts);
-
-  try {
-    const clean = String(raw || "")
-      .replace(/^```json\s*/i, "")
-      .replace(/^```\s*/i, "")
-      .replace(/```$/i, "")
-      .trim();
-    return JSON.parse(clean);
-  } catch {
-    return { transcription: String(raw || "").trim(), customer_name: null, delivery_or_pickup: null, address_text: null, payment: null };
-  }
-}
-
-// ===============================
-// CARDAPIOWEB (curto)
-// ===============================
 async function getMerchant() {
   const base = ENV.CARDAPIOWEB_BASE_URL || "https://integracao.cardapioweb.com";
+  const url = `${base}/api/partner/v1/merchant`;
+
   try {
-    const resp = await fetch(`${base}/api/partner/v1/merchant`, {
+    const resp = await fetch(url, {
       headers: { "X-API-KEY": ENV.CARDAPIOWEB_TOKEN, Accept: "application/json" },
     });
     return await resp.json();
   } catch (e) {
-    console.error("❌ getMerchant:", e?.message || e);
+    console.error("❌ getMerchant erro:", e?.message || e);
     return null;
   }
 }
@@ -394,14 +372,14 @@ function normalizePayments(merchant) {
     merchant?.payments ||
     null;
 
-  if (!Array.isArray(raw)) return "PIX, Cartão e Dinheiro";
+  if (!Array.isArray(raw)) return "PIX, Cartão, Dinheiro";
 
   const names = raw
     .filter((p) => p && (p.ativo === true || p.active === true || p.enabled === true || p.status === "ACTIVE"))
     .map((p) => p?.método_de_pagamento || p?.metodo_de_pagamento || p?.name || p?.method || p?.type)
     .filter(Boolean);
 
-  return names.length ? names.join(", ") : "PIX, Cartão e Dinheiro";
+  return names.length ? names.join(", ") : "PIX, Cartão, Dinheiro";
 }
 
 function normalizeAddress(merchant) {
@@ -423,10 +401,11 @@ router.get("/", (req, res) => res.send("Pappi API IA online 🧠✅"));
 router.get("/health", (req, res) => res.json({ ok: true, app: "Pappi Pizza IA" }));
 
 // ===============================
-// WEBHOOK DO BANCO INTER
+// WEBHOOK DO BANCO INTER (PIX)
 // ===============================
 router.post("/webhook/inter", async (req, res) => {
   res.sendStatus(200);
+
   const pagamentos = req.body;
   if (!pagamentos || !Array.isArray(pagamentos)) return;
 
@@ -438,12 +417,12 @@ router.post("/webhook/inter", async (req, res) => {
       if (!order) continue;
 
       await prisma.order.update({ where: { id: order.id }, data: { status: "confirmed" } });
-      const customer = await prisma.customer.findUnique({ where: { id: order.customerId } });
 
-      if (customer) {
+      const customer = await prisma.customer.findUnique({ where: { id: order.customerId } });
+      if (customer?.phone) {
         await sendText(
           customer.phone,
-          `✅ *Pagamento confirmado!* Recebemos seu PIX de R$ ${pag.valor}.\nSeu pedido já foi pra cozinha 🍕👨‍🍳`
+          `✅ Pagamento confirmado! Recebemos R$ ${pag.valor}.\nPedido enviado pra cozinha 🍕👨‍🍳`
         );
       }
     }
@@ -453,7 +432,7 @@ router.post("/webhook/inter", async (req, res) => {
 });
 
 // ===============================
-// WEBHOOK WHATSAPP
+// WEBHOOK PRINCIPAL (WhatsApp Cloud)
 // ===============================
 router.post("/webhook", async (req, res) => {
   res.sendStatus(200);
@@ -465,33 +444,13 @@ router.post("/webhook", async (req, res) => {
   const from = msg.from;
 
   try {
-    // sempre carrega customer
     let customer = await prisma.customer.findUnique({ where: { phone: from } }).catch(() => null);
     if (!customer) customer = await prisma.customer.create({ data: { phone: from } });
 
-    // ============================
-    // BOTÕES (interactive)
-    // ============================
+    // 1) Botões
     if (msg.type === "interactive") {
       const btnId = msg?.interactive?.button_reply?.id || null;
 
-      // Nome
-      if (btnId === "NAME_OK") {
-        pendingName.delete(from);
-        pushHistory(from, "user", "BOTÃO: nome confirmado");
-        if (!customer.lastFulfillment) await askFulfillmentButtons(from);
-        else if (!customer.preferredPayment) await askPaymentButtons(from);
-        else await sendText(from, "Show ✅ Me diga seu pedido 🍕");
-        return;
-      }
-
-      if (btnId === "NAME_EDIT") {
-        pendingName.delete(from);
-        await sendText(from, "Sem problema 🙂 Me diga seu nome, por favor.");
-        return;
-      }
-
-      // Entrega/retirada
       if (btnId === "FULFILLMENT_ENTREGA" || btnId === "FULFILLMENT_RETIRADA") {
         const v = btnId === "FULFILLMENT_ENTREGA" ? "entrega" : "retirada";
         customer = await prisma.customer.update({
@@ -499,23 +458,8 @@ router.post("/webhook", async (req, res) => {
           data: { lastFulfillment: v, lastInteraction: new Date() },
         });
         pushHistory(from, "user", `BOTÃO: ${v}`);
-
-        // se entrega e não tem endereço, pede CEP/Localização curto
-        if (v === "entrega" && !customer.lastAddress) {
-          await sendText(from, "Pra entregar rapidinho: manda *CEP* ou *Localização 📍* 🙂");
-          return;
-        }
-
-        if (!customer.preferredPayment) {
-          await askPaymentButtons(from);
-          return;
-        }
-
-        await sendText(from, "Show ✅ Me diga seu pedido 🍕");
-        return;
       }
 
-      // Pagamento
       if (btnId === "PAY_PIX" || btnId === "PAY_CARTAO" || btnId === "PAY_DINHEIRO") {
         const v = btnId === "PAY_PIX" ? "pix" : btnId === "PAY_CARTAO" ? "cartao" : "dinheiro";
         customer = await prisma.customer.update({
@@ -523,82 +467,69 @@ router.post("/webhook", async (req, res) => {
           data: { preferredPayment: v, lastInteraction: new Date() },
         });
         pushHistory(from, "user", `BOTÃO: pagamento ${v}`);
-        await sendText(from, "Perfeito ✅ Agora me diga seu pedido 🍕");
-        return;
       }
 
-      // Confirma endereço
       if (btnId === "ADDR_CONFIRM") {
         const af = getAF(from);
         const formatted = af?.pending?.formatted || null;
 
         if (formatted) {
-          customer = await prisma.customer.update({
-            where: { phone: from },
-            data: { lastAddress: String(formatted).slice(0, 200), lastInteraction: new Date() },
-          });
+          await prisma.customer
+            .update({
+              where: { phone: from },
+              data: { lastAddress: String(formatted).slice(0, 200), lastInteraction: new Date() },
+            })
+            .catch(() => null);
+
           pushHistory(from, "user", `ENDEREÇO CONFIRMADO: ${formatted}`);
         }
 
         resetAF(from);
-        await sendText(from, "Endereço confirmado ✅ Agora me diga seu pedido 🍕");
+        await sendText(from, "Fechado ✅ Agora me diga seu pedido 🍕");
         return;
       }
 
       if (btnId === "ADDR_CORRECT") {
         resetAF(from);
-        await sendText(from, "Me manda *Rua + Número + Bairro* ou *CEP* ou *Localização 📍* 🙂");
+        await sendText(from, "Me manda *CEP* ou *Rua + Número + Bairro* (ou sua localização 📍).");
         return;
       }
-
-      return;
     }
 
-    // ============================
-    // Entrada: texto / áudio / localização
-    // ============================
+    // 2) Entrada (texto ou localização) — áudio você pode plugar depois
     let userText = "";
-    let extracted = null;
-
-    if (msg.type === "audio") {
-      const audio = await downloadAudio(msg.audio?.id);
-      if (!audio?.base64) {
-        await sendText(from, "Não consegui ouvir 😕 Pode escrever pra mim?");
-        return;
-      }
-      extracted = await transcribeAndExtractFromAudio(audio.base64, audio.mimeType);
-      userText = String(extracted?.transcription || "").trim();
-      if (userText) userText = `ÁUDIO: ${userText}`;
-    }
 
     if (msg.type === "text") {
       userText = msg.text?.body || "";
       if (!userText) return;
-    }
-
-    if (msg.type === "location") {
+    } else if (msg.type === "location") {
       const lat = msg.location?.latitude;
       const lng = msg.location?.longitude;
 
-      customer = await prisma.customer.update({
-        where: { phone: from },
-        data: { lastInteraction: new Date(), lastFulfillment: customer.lastFulfillment || "entrega" },
-      });
-
       if (!lat || !lng) {
-        await sendText(from, "Não consegui ler sua localização 😕 Pode mandar de novo?");
+        await sendText(from, "Não consegui ler sua localização 😕 Manda de novo?");
         return;
+      }
+
+      // assume entrega se não escolheu ainda
+      if (!customer.lastFulfillment) {
+        customer = await prisma.customer
+          .update({
+            where: { phone: from },
+            data: { lastFulfillment: "entrega", lastInteraction: new Date() },
+          })
+          .catch(() => customer);
       }
 
       const formatted = await reverseGeocodeLatLng(lat, lng);
       if (!formatted) {
-        await sendText(from, "Não consegui virar endereço 😕\nManda *Rua + Número + Bairro* ou *CEP*?");
+        await sendText(from, "Não consegui achar no mapa 😕 Manda *Rua + Número + Bairro* ou *CEP*.");
         return;
       }
 
       const deliveryGPS = await quoteAny(formatted);
       if (!deliveryGPS?.ok) {
-        await sendText(from, "Quase lá 😅 Confirma a localização ou manda *Rua + Número + Bairro* / *CEP*.");
+        await sendText(from, "Quase! Confirma o endereço ou manda *Rua + Número + Bairro* / *CEP*.");
         return;
       }
 
@@ -608,189 +539,107 @@ router.post("/webhook", async (req, res) => {
 
       await askAddressConfirm(from, formatted, deliveryGPS);
       return;
+    } else if (msg.type === "interactive") {
+      // já tratado acima
+      return;
+    } else {
+      return;
     }
 
-    // ============================
-    // Atualiza dados do cliente (nome / envio / pagamento)
-    // ============================
-    if (userText) {
-      const nm = extractNameLight(userText);
-      const ff = detectFulfillmentLight(userText);
-      const pay = detectPaymentLight(userText);
+    // 3) Atualiza customer (nome / entrega / pagamento)
+    const nm = extractNameLight(userText);
+    const ff = detectFulfillmentLight(userText);
+    const pay = detectPaymentLight(userText);
 
-      const dataToUpdate = {};
-      if (nm && !customer.name) dataToUpdate.name = nm;
+    const dataToUpdate = { lastInteraction: new Date() };
+    if (nm && !customer.name) dataToUpdate.name = nm;
+    if (ff) dataToUpdate.lastFulfillment = ff;
+    if (pay) dataToUpdate.preferredPayment = pay;
 
-      // nome puro (Alex Junior)
-      if (!dataToUpdate.name && !customer.name && looksLikeJustAName(userText)) {
-        const guess = userText.trim().slice(0, 40);
-        pendingName.set(from, guess);
+    customer = await prisma.customer
+      .update({ where: { phone: from }, data: dataToUpdate })
+      .catch(() => customer);
 
-        // salva “tentativa” como nome (pra não ficar OPIPOJPO / lixo)
-        customer = await prisma.customer.update({
-          where: { phone: from },
-          data: { name: guess, lastInteraction: new Date() },
-        });
+    pushHistory(from, "user", userText);
 
-        await sendButtons(from, `Seu nome é *${guess}*?`, [
-          { id: "NAME_OK", title: "✅ Sim" },
-          { id: "NAME_EDIT", title: "✏️ Corrigir" },
-        ]);
-        return;
-      }
-
-      if (ff) dataToUpdate.lastFulfillment = ff;
-      if (pay) dataToUpdate.preferredPayment = pay;
-      dataToUpdate.lastInteraction = new Date();
-
-      if (Object.keys(dataToUpdate).length) {
-        customer = await prisma.customer.update({ where: { phone: from }, data: dataToUpdate });
-      }
+    // 4) Pergunta nome 1x (pra pegar quem só manda "sim/oi")
+    if (shouldAskName(from, customer) && /^(oi|olá|ola|sim|boa|boa noite|bom dia|boa tarde)$/i.test(userText.trim())) {
+      await sendText(from, "Pra eu te atender certinho 😊 qual seu nome?");
+      return;
     }
 
-    // dados do áudio
-    if (extracted) {
-      const dataToUpdate = {};
-      if (extracted.customer_name && !customer.name) dataToUpdate.name = String(extracted.customer_name).slice(0, 60);
-      if (extracted.delivery_or_pickup) dataToUpdate.lastFulfillment = extracted.delivery_or_pickup;
-      if (extracted.payment) dataToUpdate.preferredPayment = extracted.payment;
-      if (Object.keys(dataToUpdate).length) {
-        customer = await prisma.customer.update({ where: { phone: from }, data: dataToUpdate });
-      }
-    }
-
-    if (userText) pushHistory(from, "user", userText);
-
-    // ============================
-    // Perguntas obrigatórias rápidas
-    // ============================
+    // 5) Se não escolheu entrega/retirada, pergunta
     if (!customer.lastFulfillment) {
       await askFulfillmentButtons(from);
       return;
     }
 
+    // 6) Se não escolheu pagamento, pergunta
     if (!customer.preferredPayment) {
       await askPaymentButtons(from);
       return;
     }
 
-    // Se entrega e não tem endereço salvo: pede CEP/Localização (curto)
-    if (customer.lastFulfillment === "entrega" && !customer.lastAddress) {
-      // se texto parece endereço, tenta já
-      const maybeCep = extractCep(userText);
-      const maybeHasStreet = /rua|av|avenida|travessa|rodovia|estrada/i.test(userText);
-
-      if (!maybeCep && !maybeHasStreet) {
-        await sendText(from, "Pra entregar rapidinho: manda *CEP* ou *Localização 📍* 🙂");
-        return;
-      }
-    }
-
-    // ============================
-    // Fluxo guiado do endereço (somente entrega)
-    // ============================
-    if (customer.lastFulfillment === "entrega" && msg.type === "text") {
-      const af = getAF(from);
-      const t = String(userText || "").trim();
-
-      const cep = extractCep(t);
-      if (cep) {
-        af.cep = cep;
-        af.step = "ASK_NUMBER";
-        await sendText(from, "Perfeito ✅ Qual o *número* da casa?");
-        return;
-      }
-
-      if (af.step === "ASK_NUMBER") {
-        const n = extractHouseNumber(t);
-        if (!n) {
-          await sendText(from, "Me diz só o *número* 😊");
-          return;
-        }
-        af.number = n;
-        af.step = "ASK_BAIRRO";
-        await sendText(from, "Boa! Qual o *bairro*?");
-        return;
-      }
-
-      if (af.step === "ASK_BAIRRO") {
-        af.bairro = t.slice(0, 80);
-        af.step = "ASK_COMPLEMENTO";
-        await sendText(from, "Tem *complemento*? Se não tiver, diga *sem*.");
-        return;
-      }
-
-      if (af.step === "ASK_COMPLEMENTO") {
-        af.complemento = looksLikeNoComplement(t) ? null : t.slice(0, 120);
-        af.step = null;
-
-        const full = buildAddressText(af);
-        const d2 = await quoteAny(full);
-
-        if (!d2?.ok) {
-          await sendText(from, "Quase lá 😅 Manda *Rua + Número + Bairro* ou *Localização 📍*.");
-          return;
-        }
-
-        af.pending = { formatted: d2.formatted };
-        af.delivery = d2;
-        await askAddressConfirm(from, d2.formatted, d2);
-        return;
-      }
-    }
-
-    // ============================
-    // Tenta calcular entrega (Maps/taxa)
-    // ============================
+    // 7) Endereço (só se entrega) — sem textão
     let delivery = null;
-    let deliveryInternal = `ENTREGA: não aplicável`;
-
     if (customer.lastFulfillment === "entrega") {
-      const addressCandidate = extracted?.address_text || userText || customer.lastAddress || "";
-      delivery = await quoteAny(addressCandidate);
+      // se já tem lastAddress e a pessoa só está “continuando”, não precisa pedir sempre
+      const candidate = userText;
+
+      delivery = await quoteAny(candidate);
 
       if (delivery?.ok && delivery.formatted) {
-        customer = await prisma.customer.update({
-          where: { phone: from },
-          data: { lastAddress: String(delivery.formatted).slice(0, 200) },
-        });
-        deliveryInternal = `ENTREGA: ${Number.isFinite(delivery?.km) ? delivery.km.toFixed(1) : "?"} km | Taxa: ${
-          delivery?.fee != null ? `R$ ${Number(delivery.fee).toFixed(2)}` : "a confirmar"
-        }`;
+        await prisma.customer
+          .update({
+            where: { phone: from },
+            data: { lastAddress: String(delivery.formatted).slice(0, 200) },
+          })
+          .catch(() => null);
       }
 
       if (delivery?.ok && delivery.within === false) {
-        await sendText(from, `Poxa 😕 ainda não entregamos aí (até ${MAX_KM} km). Quer mudar pra *Retirada*?`);
+        await sendText(from, `Ainda não entregamos aí (até ${MAX_KM} km). Quer *Retirada*?`);
         return;
       }
 
       if (!delivery?.ok) {
-        // inicia guiado se falhou e não estamos no fluxo
+        // inicia fluxo guiado curto
         const af = getAF(from);
-        if (!af.step && !af.pending) {
-          const maybeCep = extractCep(userText);
-          if (maybeCep) {
-            af.cep = maybeCep;
-            af.step = "ASK_NUMBER";
-            await sendText(from, "Qual o *número* da casa?");
-            return;
-          }
-          // se parece rua sem número, pede número
-          const num = extractHouseNumber(userText);
-          if (!num && /rua|av|avenida|travessa|rodovia|estrada/i.test(userText)) {
-            af.street = userText.trim().slice(0, 120);
-            af.step = "ASK_NUMBER";
-            await sendText(from, "Qual o *número*? (ou mande *CEP* / *Localização 📍*)");
-            return;
-          }
+
+        const cep = extractCep(candidate);
+        if (cep) {
+          af.cep = cep;
+          af.step = "ASK_NUMBER";
+          await sendText(from, "Qual o *número* da casa?");
+          return;
         }
+
+        const num = extractHouseNumber(candidate);
+        if (!num) {
+          af.street = candidate.slice(0, 120);
+          af.step = "ASK_NUMBER";
+          await sendText(from, "Me diz o *número* da casa 😊 (ou manda *CEP* / localização 📍)");
+          return;
+        }
+
+        if (!af.street) af.street = candidate.slice(0, 120);
+        af.number = num;
+
+        if (!af.bairro) {
+          af.step = "ASK_BAIRRO";
+          await sendText(from, "Qual o *bairro*?");
+          return;
+        }
+
+        af.step = "ASK_COMPLEMENTO";
+        await sendText(from, "Tem *complemento*? Se não, diga *sem*.");
+        return;
       }
     }
 
-    // ============================
-    // Cérebro da IA (curto, sem menu gigante)
-    // ============================
-    const [merchant, configPix] = await Promise.all([
+    // 8) Cérebro (IA)
+    const [menu, merchant, configPix] = await Promise.all([
+      getMenu(),
       getMerchant(),
       prisma.config.findUnique({ where: { key: "CHAVE_PIX" } }).catch(() => null),
     ]);
@@ -804,77 +653,91 @@ router.post("/webhook", async (req, res) => {
     const historyText = getHistoryText(from);
     const upsell = getUpsellHint({ historyText, userText });
 
+    const deliveryInternal =
+      customer.lastFulfillment === "entrega" && delivery?.ok
+        ? `ENTREGA (interno): ${delivery.km?.toFixed?.(1) ?? "?"} km | taxa ${delivery.fee ?? "?"}`
+        : `ENTREGA (interno): não aplicável`;
+
     const PROMPT = `
 Você é o atendente virtual da Pappi Pizza (Campinas-SP).
-Tom: simpático, direto, sem textão. Máximo 2 a 4 linhas.
-NUNCA diga: "VIP", "modo", "evento", "interno", "Google", "Maps".
+Tom: simpático, rápido e objetivo. Sem textão.
 
-Já sabemos:
-- Nome: ${customer.name || "?"}
-- Envio: ${customer.lastFulfillment}
-- Pagamento: ${customer.preferredPayment}
-- Endereço (se entrega): ${customer.lastAddress || "não informado"}
+REGRAS CRÍTICAS:
+- NUNCA diga: "VIP", "modo", "evento", "interno", "Google", "Maps".
+- Se não souber o nome, pergunte 1x (depois pare).
+- Já sabemos:
+  - Nome: ${customer.name || "desconhecido"}
+  - Entrega/Retirada: ${customer.lastFulfillment}
+  - Pagamento: ${customer.preferredPayment}
 
-Regras:
-- Se cliente pedir sabores: sugira no máximo 5 e mande o link do cardápio.
-- Se for entrega e faltar endereço: pedir CEP ou localização.
-- Se pagamento for PIX e o pedido estiver pronto pra fechar, coloque no FINAL: [GERAR_PIX:valor] (ex: [GERAR_PIX:57.90])
-- Sempre termine com 1 pergunta clara.
+PIX (IMPORTANTE):
+- Quando o cliente CONFIRMAR que quer finalizar e pagamento for PIX,
+  adicione no FINAL: [GERAR_PIX:valor] (ex: [GERAR_PIX:57.90]).
 
-Regras da casa (interno):
+SE ENTREGA:
+- Se faltar endereço, pedir: CEP ou Rua+Número+Bairro ou Localização.
+- Se fora do raio, oferecer retirada.
+
+Sempre termine com 1 pergunta curta.
+
+REGRAS (interno):
 ${RULES}
 
-Dados da loja:
+DADOS:
 - Endereço loja: ${enderecoLoja}
 - Pagamentos: ${pagamentosLoja}
 - PIX: ${pixKey}
 - Cardápio: ${LINK_CARDAPIO}
+
 ${deliveryInternal}
 
-Histórico:
+CARDÁPIO:
+${menu}
+
+HISTÓRICO:
 ${historyText}
 
-Upsell (no máximo 1, se fizer sentido):
+UPSELL (no máximo 1):
 ${upsell || "NENHUM"}
 `.trim();
 
-    const content = `${PROMPT}\n\nCliente: ${userText || "(sem texto)"}\nAtendente:`;
+    const content = `${PROMPT}\n\nCliente: ${userText}\nAtendente:`;
     let resposta = await geminiGenerate(content);
 
-    // ============================
-    // PIX INTERCEPT (gera QR + copia/cola)
-    // ============================
+    // 9) PIX INTERCEPT (sempre dentro do webhook)
     const pixMatch = resposta.match(/\[GERAR_PIX:(\d+\.\d{2})\]/);
     if (pixMatch) {
       const valorTotal = parseFloat(pixMatch[1]);
       resposta = resposta.replace(pixMatch[0], "").trim();
 
-      // manda resposta “normal”
-      if (resposta) {
-        pushHistory(from, "assistant", resposta);
-        await sendText(from, resposta);
-      }
+      // manda texto “normal”
+      if (resposta) await sendText(from, resposta);
 
       const txid = `PAPPI${Date.now()}`;
-      const pixData = await createPixCharge(txid, valorTotal, customer.name || "Cliente Pappi").catch(() => null);
+      const pixData = await createPixCharge(txid, valorTotal, customer.name || "Cliente Pappi");
 
-      if (pixData && pixData.pixCopiaECola) {
+      if (pixData?.pixCopiaECola) {
         await prisma.order.create({
           data: {
             displayId: txid,
             status: "waiting_payment",
             total: valorTotal,
-            items: "Pedido WhatsApp",
+            items: "Pedido via WhatsApp",
             customerId: customer.id,
           },
         });
 
-        const qrCodeUrl = `https://quickchart.io/qr?size=300&text=${encodeURIComponent(pixData.pixCopiaECola)}`;
-        await sendImage(from, qrCodeUrl, "📷 QR Code do PIX");
-        await sendText(from, `PIX Copia e Cola:\n\n${pixData.pixCopiaECola}`);
+        const qrCodeUrl = `https://quickchart.io/qr?size=300&text=${encodeURIComponent(
+          pixData.pixCopiaECola
+        )}`;
+
+        await sendImage(from, qrCodeUrl, "QR Code PIX ✅");
+        await sendText(from, `Copia e Cola:\n${pixData.pixCopiaECola}`);
       } else {
-        await sendText(from, `Não consegui gerar o QR 😕\nPode usar a chave: *${pixKey}*`);
+        await sendText(from, `Não consegui gerar o QR agora 😅\nChave PIX: ${pixKey}`);
       }
+
+      pushHistory(from, "assistant", resposta || "[PIX GERADO]");
       return;
     }
 
@@ -882,7 +745,7 @@ ${upsell || "NENHUM"}
     await sendText(from, resposta);
   } catch (error) {
     console.error("🔥 Erro:", error);
-    await sendText(from, `Tive uma instabilidade 😅\nPeça aqui: ${LINK_CARDAPIO}`);
+    await sendText(from, `Deu uma instabilidade 😅\nPede aqui: ${LINK_CARDAPIO}`);
   }
 });
 

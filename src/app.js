@@ -19,4 +19,6 @@ app.use("/admin", adminRulesRoutes);
 
 app.use((req, res) => res.status(404).json({ error: "not_found" }));
 
+app.get("/__ver", (req, res) => res.json({ ok: true, v: "admin-rotas-v1" }));
+
 module.exports = app;

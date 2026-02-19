@@ -832,3 +832,13 @@ ${upsell || "NENHUM"}
 
 module.exports = router;
 ```0
+} catch (error) {
+    console.error("🔥 Erro:", error);
+    await sendText(
+      from,
+      `Tive uma instabilidade rapidinha 😅🍕\nMe manda: seu pedido + se é entrega ou retirada.\nSe preferir, peça aqui:\n${LINK_CARDAPIO}`
+    );
+  }
+});
+
+module.exports = router;

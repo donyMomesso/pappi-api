@@ -10,9 +10,6 @@ const { quoteDeliveryIfPossible, MAX_KM } = require("../services/deliveryQuote.s
 const { createPixCharge } = require("../services/interPix.service");
 
 // Node 18+ / Render / Node 22 tem fetch global
-// Se seu ambiente der erro de fetch, descomente:
-// const fetch = (...args) => import("node-fetch").then(({ default: fetch }) => fetch(...args));
-
 const router = express.Router();
 const prisma = new PrismaClient();
 
@@ -42,9 +39,7 @@ function pushHistory(phone, role, text) {
 }
 function getHistoryText(phone) {
   const h = chatHistory.get(phone) || [];
-  return h
-    .map((x) => (x.role === "user" ? `Cliente: ${x.text}` : `Atendente: ${x.text}`))
-    .join("\n");
+  return h.map((x) => (x.role === "user" ? `Cliente: ${x.text}` : `Atendente: ${x.text}`)).join("\n");
 }
 function detectLoop(phone) {
   const h = chatHistory.get(phone) || [];
@@ -89,15 +84,11 @@ async function clearHandoff(phone) {
 // ===================================================
 function detectHumanRequest(text) {
   const t = String(text || "").toLowerCase();
-  return /(humano|atendente|pessoa|moça|moca|falar com|me atende|quero atendimento|chama alguém|gerente)/i.test(
-    t
-  );
+  return /(humano|atendente|pessoa|moça|moca|falar com|me atende|quero atendimento|chama alguém|gerente)/i.test(t);
 }
 function detectIrritation(text) {
   const t = String(text || "").toLowerCase();
-  return /(caracas|aff|pqp|irritad|raiva|rid[ií]culo|absurdo|lixo|merda|porra|n[aã]o aguento|ta errado|de novo|para|chega|vsf)/i.test(
-    t
-  );
+  return /(caracas|aff|pqp|irritad|raiva|rid[ií]culo|absurdo|lixo|merda|porra|n[aã]o aguento|ta errado|de novo|para|chega|vsf)/i.test(t);
 }
 
 async function askDeescalationButtons(to) {
@@ -121,24 +112,18 @@ const orderDraft = new Map(); // phone -> { text, updatedAt }
 function getDraft(phone) {
   return orderDraft.get(phone) || null;
 }
-
 function setDraft(phone, text) {
   orderDraft.set(phone, { text: String(text || "").slice(0, 700), updatedAt: Date.now() });
 }
-
 function clearDraft(phone) {
   orderDraft.delete(phone);
 }
-
 function looksLikeOrderIntent(text) {
   const t = String(text || "").toLowerCase().trim();
   if (!t) return false;
-
   if (/(quero|pedir|fecha|fechar|vou querer|manda|me vê)/i.test(t)) return true;
-  if (/(pizza|calabresa|mussarela|frango|portuguesa|4 queijos|quatro queijos|meia|metade|borda|grande|m[eé]dia|pequena)/i.test(t)) return true;
-  
+  if (/(pizza|calabresa|mussarela|frango|portuguesa|4 queijos|quatro queijos|meia|metade|borda|grande|m[eé]dia|pequena|familia|família)/i.test(t)) return true;
   if (/(quanto|valor|preço|preco|taxa)/i.test(t) && t.length < 30) return false;
-  
   return false;
 }
 
@@ -148,21 +133,17 @@ function looksLikeOrderIntent(text) {
 function digitsOnly(str) {
   return String(str || "").replace(/\D/g, "");
 }
-
 function extractCep(text) {
   const d = digitsOnly(text);
   return d.length === 8 ? d : null;
 }
-
 function extractHouseNumber(text) {
   const m = String(text || "").match(/\b\d{1,5}\b/);
   return m ? m[0] : null;
 }
-
 function looksLikeNoComplement(text) {
   return /^(sem|não tem|nao tem)\s*(complemento)?$/i.test(String(text || "").trim());
 }
-
 function looksLikeAddress(text) {
   const t = String(text || "").toLowerCase().trim();
   if (!t) return false;
@@ -175,7 +156,7 @@ function looksLikeAddress(text) {
   const isIntentPhrase = /(pizza|quanto|preço|preco|valor|card[aá]pio|menu|promo|rápido|rapido)/i.test(t);
   if (isIntentPhrase && !hasStreetWord) return false;
 
-  return (hasStreetWord && hasNumber) || (hasStreetWord && t.length >= 10);
+  return (hasStreetWord && hasNumber) || (hasStreetWord && t.length >= 10) || (hasNumber && t.length > 15);
 }
 
 // ===================================================
@@ -183,16 +164,18 @@ function looksLikeAddress(text) {
 // ===================================================
 function extractNameLight(text) {
   const t = String(text || "").trim();
-  
+
+  // se for só um nome
   if (/^[A-Za-zÀ-ÿ]+(?:\s+[A-Za-zÀ-ÿ]+){0,2}$/.test(t) && t.length >= 2) {
     if (/^(sim|nao|não|ok|blz|beleza|oi|ola|olá)$/i.test(t)) return null;
     return t.slice(0, 60);
   }
-  
+
+  // "meu nome é X"
   const m = t.match(/(?:meu nome é|aqui é o|aqui é a|sou o|sou a|me chamo)\s+([A-Za-zÀ-ÿ]+(?:\s+[A-Za-zÀ-ÿ]+){0,2})/i);
   const name = m?.[1]?.trim();
   if (!name || name.length < 2) return null;
-  
+
   return name.slice(0, 60);
 }
 
@@ -200,8 +183,10 @@ function looksLikeGarbageName(name) {
   const n = String(name || "").trim();
   if (n.length < 2) return true;
   const vowels = (n.match(/[aeiouáàâãéèêíìîóòôõúùû]/gi) || []).length;
-  if (vowels < 2) return true;
+  if (vowels < 1) return true;
   if (/(.)\1\1/.test(n)) return true;
+  // evita tokens aleatórios tipo "opipojpo"
+  if (n.length >= 6 && vowels === 1) return true;
   return false;
 }
 
@@ -235,14 +220,10 @@ async function waSend(payload) {
     console.error("❌ WHATSAPP_TOKEN ou WHATSAPP_PHONE_NUMBER_ID não configurado.");
     return;
   }
-
   const url = `https://graph.facebook.com/v24.0/${ENV.WHATSAPP_PHONE_NUMBER_ID}/messages`;
   await fetch(url, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${ENV.WHATSAPP_TOKEN}`,
-      "Content-Type": "application/json",
-    },
+    headers: { Authorization: `Bearer ${ENV.WHATSAPP_TOKEN}`, "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   }).catch((e) => console.error("❌ Erro WA API:", e));
 }
@@ -307,11 +288,9 @@ function getAF(phone) {
   if (!addressFlow.has(phone)) addressFlow.set(phone, { step: null });
   return addressFlow.get(phone);
 }
-
 function resetAF(phone) {
   addressFlow.set(phone, { step: null });
 }
-
 function buildAddressText(af) {
   const parts = [];
   if (af.street) parts.push(af.street);
@@ -324,12 +303,10 @@ function buildAddressText(af) {
 
 async function safeQuote(addressText) {
   try {
-    const r = await quoteDeliveryIfPossible(addressText);
-    return r;
+    return await quoteDeliveryIfPossible(addressText);
   } catch (e1) {
     try {
-      const r2 = await quoteDeliveryIfPossible({ addressText });
-      return r2;
+      return await quoteDeliveryIfPossible({ addressText });
     } catch (e2) {
       return null;
     }
@@ -338,16 +315,16 @@ async function safeQuote(addressText) {
 
 async function reverseGeocodeLatLng(lat, lng) {
   if (!ENV.GOOGLE_MAPS_API_KEY) return null;
-  
-  const url = `https://maps.googleapis.com/maps/api/geocode/json?` +
+
+  const url =
+    `https://maps.googleapis.com/maps/api/geocode/json?` +
     `latlng=${lat},${lng}` +
     `&key=${ENV.GOOGLE_MAPS_API_KEY}` +
-    `&language=pt-BR` +
-    `&result_type=street_address|premise|subpremise|route`;
-    
+    `&language=pt-BR`;
+
   const resp = await fetch(url).catch(() => null);
   if (!resp) return null;
-  
+
   const data = await resp.json().catch(() => null);
   return data?.results?.[0]?.formatted_address || null;
 }
@@ -356,16 +333,16 @@ async function askAddressConfirm(to, formatted, delivery) {
   const feeTxt = delivery?.fee != null ? `R$ ${Number(delivery.fee).toFixed(2)}` : "a confirmar";
   const kmTxt = Number.isFinite(delivery?.km) ? `${delivery.km.toFixed(1)} km` : "";
   const txt = `Confere o endereço? 📍\n*${formatted}*\nTaxa: *${feeTxt}*${kmTxt ? ` | ${kmTxt}` : ""}`;
-  
+
   return sendButtons(to, txt, [
     { id: "ADDR_CONFIRM", title: "✅ Confirmar" },
     { id: "ADDR_CORRECT", title: "✏️ Corrigir" },
   ]);
 }
 
-// ===============================
+// ===================================================
 // IA (Gemini) - robusto contra 429 (quota) CIRCUIT BREAKER
-// ===============================
+// ===================================================
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
 let cachedGeminiModel = null;
 
@@ -395,11 +372,9 @@ async function listGeminiModels() {
 }
 
 function pickGeminiModel(models) {
-  const supported = models.filter((m) =>
-    (m.supportedGenerationMethods || []).includes("generateContent")
-  );
+  const supported = models.filter((m) => (m.supportedGenerationMethods || []).includes("generateContent"));
 
-  // ✅ Prioriza modelos mais baratos/menos rateados primeiro
+  // prioriza modelos menos rateados
   const preferred = [
     (ENV.GEMINI_MODEL || "").replace(/^models\//, ""),
     "gemini-2.0-flash",
@@ -443,49 +418,36 @@ async function geminiGenerate(content) {
     ? { contents: [{ parts: content }] }
     : { contents: [{ parts: [{ text: String(content || "") }] }] };
 
-  // tentativas: 1 normal + 1 com troca de modelo (se 429)
   for (let attempt = 1; attempt <= 2; attempt++) {
     const resp = await fetch(`${GEMINI_API_BASE}/${model}:generateContent`, {
       method: "POST",
-      headers: {
-        "x-goog-api-key": apiKey,
-        "Content-Type": "application/json",
-      },
+      headers: { "x-goog-api-key": apiKey, "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
 
     const data = await resp.json().catch(() => ({}));
-
     if (resp.ok) {
-      return (
-        data?.candidates?.[0]?.content?.parts?.map((p) => p.text).filter(Boolean).join("") || ""
-      );
+      return data?.candidates?.[0]?.content?.parts?.map((p) => p.text).filter(Boolean).join("") || "";
     }
 
-    // ✅ 429: quota/rate limit
     if (resp.status === 429) {
       console.error("❌ Gemini falhou (429):", JSON.stringify(data));
-
-      // se tiver retryDelay no payload, respeita; senão espera 10s
       const retryDelaySec =
         Number(String(data?.error?.details?.find?.((d) => d?.retryDelay)?.retryDelay || "").replace("s", "")) || 10;
 
       if (attempt === 1) {
-        // troca modelo e tenta de novo
         await ensureGeminiModel(true);
         model = cachedGeminiModel;
         await sleep(Math.min(retryDelaySec * 1000, 15000));
         continue;
       }
 
-      // segunda falha: desliga Gemini por 2 minutos e cai no fallback
       disableGeminiFor(2 * 60 * 1000);
       const e = new Error("gemini_quota_exceeded");
       e.code = 429;
       throw e;
     }
 
-    // outros erros
     console.error("❌ Gemini falhou:", resp.status, JSON.stringify(data));
     const e = new Error(`generateContent failed: ${resp.status}`);
     e.code = resp.status;
@@ -496,20 +458,23 @@ async function geminiGenerate(content) {
 }
 
 // ===================================================
-// CardapioWeb
+// CardapioWeb (com CACHE pra não “sumir”)
 // ===================================================
+const menuCache = { text: null, at: 0 };
+const merchantCache = { obj: null, at: 0 };
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 min
+
 async function getMenu() {
+  if (menuCache.text && Date.now() - menuCache.at < CACHE_TTL_MS) return menuCache.text;
+
   const base = ENV.CARDAPIOWEB_BASE_URL || "https://integracao.cardapioweb.com";
   const url = `${base}/api/partner/v1/catalog`;
-  
+
   try {
-    const resp = await fetch(url, {
-      headers: { "X-API-KEY": ENV.CARDAPIOWEB_TOKEN, Accept: "application/json" },
-    });
-    
-    const data = await resp.json();
-    if (!data?.categories) return "Cardápio indisponível.";
-    
+    const resp = await fetch(url, { headers: { "X-API-KEY": ENV.CARDAPIOWEB_TOKEN, Accept: "application/json" } });
+    const data = await resp.json().catch(() => null);
+    if (!data?.categories) throw new Error("no_categories");
+
     let txt = "🍕 MENU PAPPI:\n";
     data.categories.forEach((cat) => {
       if (cat?.status === "ACTIVE") {
@@ -523,50 +488,102 @@ async function getMenu() {
         });
       }
     });
-    return txt.trim();
+
+    menuCache.text = txt.trim();
+    menuCache.at = Date.now();
+    return menuCache.text;
   } catch (e) {
     console.error("❌ getMenu erro:", e?.message || e);
-    return "Cardápio indisponível.";
+    if (menuCache.text) return menuCache.text;
+    return "Cardápio indisponível agora. Veja aqui: " + LINK_CARDAPIO;
   }
 }
 
 async function getMerchant() {
+  if (merchantCache.obj && Date.now() - merchantCache.at < CACHE_TTL_MS) return merchantCache.obj;
+
   const base = ENV.CARDAPIOWEB_BASE_URL || "https://integracao.cardapioweb.com";
   const url = `${base}/api/partner/v1/merchant`;
-  
+
   try {
-    const resp = await fetch(url, {
-      headers: { "X-API-KEY": ENV.CARDAPIOWEB_TOKEN, Accept: "application/json" },
-    });
-    return await resp.json();
+    const resp = await fetch(url, { headers: { "X-API-KEY": ENV.CARDAPIOWEB_TOKEN, Accept: "application/json" } });
+    const data = await resp.json().catch(() => null);
+    merchantCache.obj = data;
+    merchantCache.at = Date.now();
+    return data;
   } catch (e) {
     console.error("❌ getMerchant erro:", e?.message || e);
-    return null;
+    return merchantCache.obj;
   }
 }
 
 function normalizePayments(merchant) {
-  const raw = merchant?.métodos_de_pagamento || merchant?.metodos_de_pagamento || merchant?.payment_methods || merchant?.payments || null;
+  const raw =
+    merchant?.métodos_de_pagamento ||
+    merchant?.metodos_de_pagamento ||
+    merchant?.payment_methods ||
+    merchant?.payments ||
+    null;
+
   if (!Array.isArray(raw)) return "PIX, Cartão, Dinheiro";
-  
+
   const names = raw
     .filter((p) => p && (p.ativo === true || p.active === true || p.enabled === true || p.status === "ACTIVE"))
     .map((p) => p?.método_de_pagamento || p?.metodo_de_pagamento || p?.name || p?.method || p?.type)
     .filter(Boolean);
-    
+
   return names.length ? names.join(", ") : "PIX, Cartão, Dinheiro";
 }
 
 function normalizeAddress(merchant) {
   const addr = merchant?.endereço || merchant?.endereco || merchant?.address || null;
   if (!addr) return "Campinas-SP";
-  
   const rua = addr?.rua || addr?.street || "";
   const numero = addr?.número || addr?.numero || addr?.number || "";
   const bairro = addr?.bairro || addr?.district || "";
-  
   const parts = [rua, numero, bairro].filter(Boolean).join(", ");
   return parts || "Campinas-SP";
+}
+
+// ===================================================
+// Resposta determinística: “tem X?” consultando MENU real
+// ===================================================
+function normalizeForSearch(s) {
+  return String(s || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extractHasQuestion(text) {
+  const t = normalizeForSearch(text);
+  const m = t.match(/\btem\b\s+(.+?)\??$/i);
+  if (!m) return null;
+  let q = (m[1] || "").trim();
+  q = q.replace(/\b(pizza|pizzas|ai|aí|pra|por favor|pf|no cardapio|no cardápio)\b/g, "").trim();
+  if (!q || q.length < 3) return null;
+  return q.slice(0, 60);
+}
+
+function menuFindItems(menuText, query) {
+  const q = normalizeForSearch(query);
+  const words = q.split(" ").filter(Boolean);
+  if (!words.length) return [];
+
+  const lines = String(menuText || "").split("\n");
+  const hits = [];
+
+  for (const line of lines) {
+    const ln = normalizeForSearch(line);
+    if (words.every((w) => ln.includes(w))) {
+      hits.push(line.replace(/^\-\s*/, "").trim());
+      if (hits.length >= 5) break;
+    }
+  }
+  return hits;
 }
 
 // ===================================================
@@ -581,18 +598,17 @@ router.get("/health", (req, res) => res.json({ ok: true, app: "Pappi Pizza IA" }
 router.post("/webhook/inter", async (req, res) => {
   res.sendStatus(200);
   const pagamentos = req.body;
-  
   if (!pagamentos || !Array.isArray(pagamentos)) return;
-  
+
   try {
     for (const pag of pagamentos) {
       console.log(`💰 PIX RECEBIDO! TXID: ${pag.txid} | Valor: R$ ${pag.valor}`);
-      
+
       const order = await prisma.order.findFirst({ where: { displayId: pag.txid } });
       if (!order) continue;
-      
+
       await prisma.order.update({ where: { id: order.id }, data: { status: "confirmed" } });
-      
+
       const customer = await prisma.customer.findUnique({ where: { id: order.customerId } });
       if (customer?.phone) {
         await sendText(customer.phone, `✅ Pagamento confirmado! Recebemos R$ ${pag.valor}.\nPedido enviado pra cozinha 🍕👨‍🍳`);
@@ -608,11 +624,11 @@ router.post("/webhook/inter", async (req, res) => {
 // ===================================================
 router.post("/webhook", async (req, res) => {
   res.sendStatus(200);
-  
+
   const msg = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
   if (!msg) return;
   if (alreadyProcessed(msg.id)) return;
-  
+
   const from = msg.from;
 
   try {
@@ -637,20 +653,25 @@ router.post("/webhook", async (req, res) => {
 
       if (btnId === "HELP_BOT") {
         pushHistory(from, "user", "BOTÃO: continuar");
-        await sendText(from, "Fechado ✅ Vou te atender por aqui. É *Entrega* ou *Retirada*?");
+        await sendText(from, "Fechado ✅ Vou te atender por aqui.");
         await askFulfillmentButtons(from);
         return;
       }
-      
+
+      // ✅ Entrega/Retirada (limpa endereço quando vira retirada)
       if (btnId === "FULFILLMENT_ENTREGA" || btnId === "FULFILLMENT_RETIRADA") {
         const v = btnId === "FULFILLMENT_ENTREGA" ? "entrega" : "retirada";
         customer = await prisma.customer.update({
           where: { phone: from },
-          data: { lastFulfillment: v, lastInteraction: new Date() },
+          data: {
+            lastFulfillment: v,
+            lastInteraction: new Date(),
+            lastAddress: v === "retirada" ? null : customer.lastAddress,
+          },
         });
         pushHistory(from, "user", `BOTÃO: ${v}`);
       }
-      
+
       if (btnId === "PAY_PIX" || btnId === "PAY_CARTAO" || btnId === "PAY_DINHEIRO") {
         const v = btnId === "PAY_PIX" ? "pix" : btnId === "PAY_CARTAO" ? "cartao" : "dinheiro";
         customer = await prisma.customer.update({
@@ -659,47 +680,56 @@ router.post("/webhook", async (req, res) => {
         });
         pushHistory(from, "user", `BOTÃO: pagamento ${v}`);
       }
-      
+
       if (btnId === "ADDR_CONFIRM") {
         const af = getAF(from);
         const formatted = af?.pending?.formatted || null;
-        
+
         if (formatted) {
-          await prisma.customer.update({
-            where: { phone: from },
-            data: { lastAddress: String(formatted).slice(0, 200), lastInteraction: new Date() },
-          }).catch(() => null);
-          
+          await prisma.customer
+            .update({
+              where: { phone: from },
+              data: { lastAddress: String(formatted).slice(0, 200), lastInteraction: new Date() },
+            })
+            .catch(() => null);
           pushHistory(from, "user", `ENDEREÇO CONFIRMADO: ${formatted}`);
         }
-        
+
         resetAF(from);
         await sendText(from, "Fechado ✅ Agora me diga seu pedido 🍕 (tamanho + sabor, ou meia a meia)");
         return;
       }
-      
+
       if (btnId === "ADDR_CORRECT") {
         resetAF(from);
         await sendText(from, "Me manda *CEP* ou *Rua + Número + Bairro* (ou sua localização 📍).");
         return;
       }
 
-      if (!customer.name && !askedName.has(from)) {
-        askedName.add(from);
-        await sendText(from, "Show 😊 qual seu nome?");
-        return;
-      }
-      
+      // ✅ Depois de qualquer botão: se faltou Fulfillment, pergunta
       if (!customer.lastFulfillment) {
         await askFulfillmentButtons(from);
         return;
       }
-      
+
+      // ✅ Se Entrega e não tem endereço, pede
       if (customer.lastFulfillment === "entrega" && !customer.lastAddress) {
         await sendText(from, "Pra entrega, me manda *CEP* ou *Rua + Número + Bairro* (ou sua localização 📍) pra eu calcular a taxa 😊");
         return;
       }
-      
+
+      // ✅ Se não tem pagamento ainda, pede
+      if (!customer.preferredPayment) {
+        await askPaymentButtons(from);
+        return;
+      }
+
+      // ✅ Se não tem nome ainda, pede
+      if (!customer.name && shouldAskName(from, customer)) {
+        await sendText(from, "Show 😊 qual seu nome?");
+        return;
+      }
+
       await sendText(from, "Fechado 🙌 Qual pizza você quer? (tamanho + sabor, ou meia a meia)");
       return;
     }
@@ -710,21 +740,21 @@ router.post("/webhook", async (req, res) => {
     if (msg.type === "location") {
       const lat = msg.location?.latitude;
       const lng = msg.location?.longitude;
-      
+
       if (!lat || !lng) {
         await sendText(from, "Não consegui ler sua localização 😕 Manda de novo?");
         return;
       }
-      
+
       if (!customer.lastFulfillment) {
-        customer = await prisma.customer.update({
-          where: { phone: from },
-          data: { lastFulfillment: "entrega", lastInteraction: new Date() },
-        }).catch(() => customer);
+        customer = await prisma.customer
+          .update({ where: { phone: from }, data: { lastFulfillment: "entrega", lastInteraction: new Date() } })
+          .catch(() => customer);
       }
-      
+
       const formatted = await reverseGeocodeLatLng(lat, lng);
-      
+
+      // ✅ Se reverse falhar, NÃO trava — confirma com fallback
       if (!formatted) {
         const fallback = `Localização recebida 📍 (GPS: ${lat}, ${lng})`;
         const af = getAF(from);
@@ -732,17 +762,17 @@ router.post("/webhook", async (req, res) => {
         await askAddressConfirm(from, fallback, null);
         return;
       }
-      
+
       const deliveryGPS = await safeQuote(formatted);
       const af = getAF(from);
       af.pending = { formatted, lat, lng };
       af.delivery = deliveryGPS || null;
-      
+
       if (deliveryGPS?.ok && deliveryGPS.within === false) {
         await sendText(from, `Ainda não entregamos aí (até ${MAX_KM} km). Quer *Retirada*?`);
         return;
       }
-      
+
       await askAddressConfirm(from, formatted, deliveryGPS || null);
       return;
     }
@@ -751,10 +781,11 @@ router.post("/webhook", async (req, res) => {
     // 3) TEXT
     // ===========================
     if (msg.type !== "text") return;
-    
+
     const userText = msg.text?.body || "";
     if (!userText) return;
 
+    // Irritação / pedir humano / loop
     if (detectHumanRequest(userText) || detectIrritation(userText) || detectLoop(from)) {
       pushHistory(from, "user", userText);
       await sendText(from, "Entendi 🙏 desculpa a confusão. Vamos resolver agora.");
@@ -762,57 +793,75 @@ router.post("/webhook", async (req, res) => {
       return;
     }
 
+    // Atualiza customer (nome / entrega / pagamento)
     const nm = extractNameLight(userText);
     const ff = detectFulfillmentLight(userText);
     const pay = detectPaymentLight(userText);
-    
+
     const dataToUpdate = { lastInteraction: new Date() };
     if (nm && !customer.name && !looksLikeGarbageName(nm)) dataToUpdate.name = nm;
     if (ff) dataToUpdate.lastFulfillment = ff;
     if (pay) dataToUpdate.preferredPayment = pay;
-    
+
     customer = await prisma.customer.update({ where: { phone: from }, data: dataToUpdate }).catch(() => customer);
     pushHistory(from, "user", userText);
 
-    if (shouldAskName(from, customer) && /^(oi|olá|ola|sim|boa|boa noite|bom dia|boa tarde|menu)$/i.test(userText.trim())) {
-      await sendText(from, "Pra eu te atender certinho 😊 me diz seu *nome*? (ex: Dony)");
-      return;
-    }
-
-    if (!customer.name && nm && looksLikeGarbageName(nm)) {
-      await sendText(from, "Me diz seu *nome* por favor? 😊 (ex: Dony)");
-      return;
-    }
-
+    // ✅ SEMPRE pergunta Entrega/Retirada se não tiver
     if (!customer.lastFulfillment) {
       await askFulfillmentButtons(from);
       return;
     }
 
-    if (!looksLikeAddress(userText) && looksLikeOrderIntent(userText)) {
-      setDraft(from, userText);
-    }
-    const draft = getDraft(from);
-
-    if (!draft) {
-      // Se ele só mandar "oi" e já tivermos o nome, o Gemini responde!
-      // Só pedimos o pedido se ele mandar "quero pedir" e não disser o quê.
+    // ✅ SEMPRE pergunta Nome (1x) se não tiver
+    if (!customer.name && shouldAskName(from, customer)) {
+      await sendText(from, "Pra eu te atender certinho 😊 me diz seu *nome*?");
+      return;
     }
 
-    // ===========================
+    // Rascunho pedido
+    if (!looksLikeAddress(userText) && looksLikeOrderIntent(userText)) setDraft(from, userText);
+
+    // ===================================================
     // 4) ENDEREÇO (só se ENTREGA)
-    // ===========================
+    // ===================================================
     let deliveryInternal = `ENTREGA (interno): não aplicável`;
 
     if (customer.lastFulfillment === "entrega" && !customer.lastAddress) {
       const af = getAF(from);
       const t = String(userText || "").trim();
-      
-      if (!af.step && !looksLikeAddress(t) && looksLikeOrderIntent(userText)) {
-        await sendText(from, "Pra entrega, me manda *CEP* ou *Rua + Número + Bairro* (ou sua localização 📍) pra eu calcular a taxa 😊");
+
+      // se ele mandou algo que parece endereço, tenta cota
+      if (looksLikeAddress(t)) {
+        const delivery = await safeQuote(t);
+
+        if (delivery?.ok) {
+          if (delivery.within === false) {
+            await sendText(from, `Ainda não entregamos aí (até ${MAX_KM} km). Quer *Retirada*?`);
+            return;
+          }
+          const formatted = delivery.formatted || t;
+          af.pending = { formatted };
+          await askAddressConfirm(from, formatted, delivery);
+          return;
+        }
+
+        // se falhou, entra no guiado
+        const num = extractHouseNumber(t);
+        if (!num) {
+          af.street = t.slice(0, 120);
+          af.step = "ASK_NUMBER";
+          await sendText(from, "Perfeito 🙌 Agora me diga o *número*.\nSe preferir, mande seu *CEP* ou *localização 📍*.");
+          return;
+        }
+
+        af.street = t.slice(0, 120);
+        af.number = num;
+        af.step = "ASK_BAIRRO";
+        await sendText(from, "Show! Qual é o *bairro*? 😊");
         return;
       }
-      
+
+      // fluxo guiado
       const cep = extractCep(t);
       if (cep) {
         af.cep = cep;
@@ -820,7 +869,7 @@ router.post("/webhook", async (req, res) => {
         await sendText(from, "Perfeito ✅ Qual o *número* da casa?");
         return;
       }
-      
+
       if (af.step === "ASK_NUMBER") {
         const n = extractHouseNumber(t);
         if (!n) { await sendText(from, "Me diz só o *número* da casa 😊"); return; }
@@ -829,114 +878,93 @@ router.post("/webhook", async (req, res) => {
         await sendText(from, "Boa! Qual o *bairro*?");
         return;
       }
-      
+
       if (af.step === "ASK_BAIRRO") {
         af.bairro = t.slice(0, 80);
         af.step = "ASK_COMPLEMENTO";
         await sendText(from, "Tem *complemento*? Se não tiver, diga *sem*.");
         return;
       }
-      
+
       if (af.step === "ASK_COMPLEMENTO") {
         af.complemento = looksLikeNoComplement(t) ? null : t.slice(0, 120);
         af.step = null;
-        
+
         const full = buildAddressText(af);
         const d2 = await safeQuote(full);
-        
+
+        // ✅ se maps falhar, NÃO trava: confirma e segue
         if (!d2?.ok) {
           af.pending = { formatted: full };
           await askAddressConfirm(from, full, null);
           return;
         }
-        
+
         if (d2.within === false) {
           await sendText(from, `Ainda não entregamos aí (até ${MAX_KM} km). Quer *Retirada*?`);
           return;
         }
-        
+
         af.pending = { formatted: d2.formatted };
         await askAddressConfirm(from, d2.formatted, d2);
         return;
       }
 
-      if (looksLikeAddress(t)) {
-        const delivery = await safeQuote(t);
-        
-        if (delivery?.ok) {
-          if (delivery.within === false) {
-            await sendText(from, `Ainda não entregamos aí (até ${MAX_KM} km). Quer *Retirada*?`);
-            return;
-          }
-          const formatted = delivery.formatted || t;
-          const af2 = getAF(from);
-          af2.pending = { formatted };
-          await askAddressConfirm(from, formatted, delivery);
-          return;
-        }
-        
-        const num = extractHouseNumber(t);
-        if (!num) {
-          af.street = t.slice(0, 120);
-          af.step = "ASK_NUMBER";
-          await sendText(from, "Perfeito 🙌 Agora me diga o *número*.\nSe preferir, mande seu *CEP* ou *localização 📍*.");
-          return;
-        }
-        
-        af.street = t.slice(0, 120);
-        af.number = num;
-        af.step = "ASK_BAIRRO";
-        await sendText(from, "Show! Qual é o *bairro*? 😊");
-        return;
-      }
-    }
-
-    if (customer.lastAddress) {
-       const finalCota = await safeQuote(customer.lastAddress);
-       const kmTxt = Number.isFinite(finalCota?.km) ? finalCota.km.toFixed(1) : "?";
-       const feeTxt = finalCota?.fee != null ? Number(finalCota.fee).toFixed(2) : "?";
-       deliveryInternal = `ENTREGA (interno): ${kmTxt} km | Taxa: R$ ${feeTxt}`;
-    }
-
-    // ===========================
-    // 5) PAGAMENTO
-    // ===========================
-    if (!customer.preferredPayment) {
-      if (customer.lastFulfillment === "entrega" && !customer.lastAddress) {
-         // Espera resolver o endereço
-      } else {
-         await askPaymentButtons(from);
-         return;
-      }
-    }
-
-    if (!customer.name) {
-      await sendText(from, "Antes de continuar 😊 qual seu *nome*?");
+      // se é entrega e ainda não tem endereço: pede
+      await sendText(from, "Pra entrega, me manda *CEP* ou *Rua + Número + Bairro* (ou sua localização 📍) pra eu calcular a taxa 😊");
       return;
     }
 
-    // ===========================
-    // 6) IA (O Cérebro) COM FALLBACK (Circuit Breaker)
-    // ===========================
+    if (customer.lastAddress) {
+      const finalCota = await safeQuote(customer.lastAddress);
+      const kmTxt = Number.isFinite(finalCota?.km) ? finalCota.km.toFixed(1) : "?";
+      const feeTxt = finalCota?.fee != null ? Number(finalCota.fee).toFixed(2) : "?";
+      deliveryInternal = `ENTREGA (interno): ${kmTxt} km | Taxa: R$ ${feeTxt}`;
+    }
+
+    // ===================================================
+    // 5) PAGAMENTO (só pede quando não faltar endereço na entrega)
+    // ===================================================
+    if (!customer.preferredPayment) {
+      await askPaymentButtons(from);
+      return;
+    }
+
+    // ===================================================
+    // 6) Carrega MENU + responde “TEM X?” de forma REAL
+    // ===================================================
     const [menu, merchant, configPix] = await Promise.all([
       getMenu(),
       getMerchant(),
       prisma.config.findUnique({ where: { key: "CHAVE_PIX" } }).catch(() => null),
     ]);
 
+    const qHas = extractHasQuestion(userText);
+    if (qHas) {
+      const hits = menuFindItems(menu, qHas);
+      if (hits.length) {
+        await sendText(from, `Tem sim 😊\n${hits.map((h) => `• ${h}`).join("\n")}\nQuer em qual tamanho?`);
+      } else {
+        await sendText(from, `No momento não achei *${qHas}* no cardápio 😕\nQuer ver todos os sabores? ${LINK_CARDAPIO}`);
+      }
+      return;
+    }
+
+    // ===================================================
+    // 7) IA (Cérebro) com fallback de quota
+    // ===================================================
     const enderecoLoja = normalizeAddress(merchant);
     const pagamentosLoja = normalizePayments(merchant);
     const pixKey = configPix?.value || "19 9 8319 3999";
-    
+
     const mode = getMode({ customer, now: new Date() });
     const RULES = loadRulesFromFiles(mode);
     const historyText = getHistoryText(from);
     const upsell = getUpsellHint({ historyText, userText });
-    
     const pedidoTxt = getDraft(from)?.text || "";
 
     const PROMPT = `
-Você atende como humano da Pappi Pizza (Campinas-SP). Não diga que é robô/IA. Fale natural e objetivo.
+Você atende como humano da Pappi Pizza (Campinas-SP). Não diga que é robô/IA. Fale natural, simpático e objetivo.
 
 REGRAS CRÍTICAS:
 - NUNCA diga: "VIP", "modo", "evento", "interno", "Google", "Maps".
@@ -946,15 +974,15 @@ REGRAS CRÍTICAS:
   - Pagamento: ${customer.preferredPayment}
   - Pedido (rascunho): ${pedidoTxt || "a definir"}
 
-ROTEIRO OBRIGATÓRIO (Passo a passo, 1 pergunta por vez):
-1. PEDIDO: Pergunte o tamanho da pizza (pequena, média, grande, família) e quais sabores. (ofereça dividir sabores).
-2. EXTRAS: Gostaria de borda recheada? Qual sabor? Vai querer refrigerante ou bebida?
-3. OBSERVAÇÕES: Alguma observação especial na pizza ou na entrega?
-4. TROCO: Se a forma de pagamento for "dinheiro", pergunte se precisa de troco.
-5. CONFIRMAÇÃO: Recapitulando: [pedido completo]. Está correto? Tempo estimado: 40 a 50 min.
+ROTEIRO OBRIGATÓRIO (1 pergunta por vez):
+1) PEDIDO: Pergunte o tamanho (pequena, média, grande, família) e sabores. Ofereça meia a meia.
+2) EXTRAS: Ofereça borda recheada e bebida.
+3) OBS: Alguma observação?
+4) TROCO: só se for dinheiro.
+5) CONFIRMAÇÃO: Resumo + total + prazo.
 
 PIX:
-- Quando o cliente CONFIRMAR que quer finalizar e pagamento for PIX, adicione no FINAL da sua resposta: [GERAR_PIX:valor] (ex: [GERAR_PIX:57.90]).
+- Quando o cliente CONFIRMAR e for PIX, adicione NO FINAL: [GERAR_PIX:valor] (ex: [GERAR_PIX:57.90])
 
 REGRAS (interno):
 ${RULES}
@@ -974,33 +1002,33 @@ ${historyText}
 
 UPSELL (no máximo 1):
 ${upsell || "NENHUM"}
+
+Sempre termine com 1 pergunta curta.
 `.trim();
 
     const content = `${PROMPT}\n\nCliente: ${userText}\nAtendente:`;
-    
+
     let resposta = "";
-    
     try {
       resposta = await geminiGenerate(content);
     } catch (e) {
-      console.error("❌ Gemini falhou definitivamente (ou Circuit Breaker ativo):", e?.message || e);
-      // MENSAGEM DE QUEDA/429
-      await sendText(from, "Estou com muitas mensagens agora 😅 Me diga apenas o *tamanho* e os *sabores* da pizza que quer pedir, por favor. (Ou veja o nosso menu rápido: " + LINK_CARDAPIO + ")");
+      console.error("❌ Gemini falhou / breaker:", e?.message || e);
+      await sendText(from, `Tô com muitas mensagens agora 😅\nMe diga: *tamanho* e *sabores* da pizza (ou veja o menu: ${LINK_CARDAPIO})`);
       return;
     }
 
-    // ===========================
-    // 7) PIX INTERCEPT
-    // ===========================
+    // ===================================================
+    // 8) PIX INTERCEPT
+    // ===================================================
     const pixMatch = resposta.match(/\[GERAR_PIX:(\d+\.\d{2})\]/);
     if (pixMatch) {
       const valorTotal = parseFloat(pixMatch[1]);
       resposta = resposta.replace(pixMatch[0], "").trim();
       if (resposta) await sendText(from, resposta);
-      
+
       const txid = `PAPPI${Date.now()}`;
       const pixData = await createPixCharge(txid, valorTotal, customer.name || "Cliente Pappi");
-      
+
       if (pixData?.pixCopiaECola) {
         await prisma.order.create({
           data: {
@@ -1011,21 +1039,21 @@ ${upsell || "NENHUM"}
             customerId: customer.id,
           },
         });
-        
+
         const qrCodeUrl = `https://quickchart.io/qr?size=300&text=${encodeURIComponent(pixData.pixCopiaECola)}`;
         await sendImage(from, qrCodeUrl, "QR Code PIX ✅");
         await sendText(from, `Copia e Cola:\n${pixData.pixCopiaECola}`);
-        clearDraft(from); // Limpa o rascunho após pedido feito!
+        clearDraft(from);
       } else {
         await sendText(from, `Não consegui gerar o QR agora 😅\nChave PIX: ${pixKey}`);
       }
+
       pushHistory(from, "assistant", resposta || "[PIX GERADO]");
       return;
     }
 
     pushHistory(from, "assistant", resposta);
     await sendText(from, resposta);
-
   } catch (error) {
     console.error("🔥 Erro Fatal Webhook:", error);
     await sendText(from, `Deu uma instabilidade 😅\nMe diz *tamanho* e *sabor* da pizza? (ou peça aqui: ${LINK_CARDAPIO})`);

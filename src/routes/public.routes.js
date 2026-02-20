@@ -258,6 +258,37 @@ function looksLikeAddress(text) {
 
   return (hasStreetWord && hasNumber) || (hasCommaNumber && hasStreetWord) || (hasStreetWord && t.length >= 10);
 }
+// ===============================
+// PEDIDO (rascunho) por telefone
+// ===============================
+const orderDraft = new Map(); // phone -> { text, updatedAt }
+
+function getDraft(phone) {
+  return orderDraft.get(phone) || null;
+}
+function setDraft(phone, text) {
+  orderDraft.set(phone, { text: String(text || "").slice(0, 600), updatedAt: Date.now() });
+}
+function clearDraft(phone) {
+  orderDraft.delete(phone);
+}
+
+function looksLikeOrderIntent(text) {
+  const t = String(text || "").toLowerCase().trim();
+  if (!t) return false;
+
+  // intenção de pedir
+  if (/(quero|me vê|manda|pedir|fechar|vou querer)/i.test(t)) return true;
+
+  // termos de pizza / pedido
+  if (/(pizza|calabresa|mussarela|frango|portuguesa|4 queijos|meia|metade|borda|grande|média|media|pequena)/i.test(t))
+    return true;
+
+  // só preço/quanto fica não é pedido ainda
+  if (/(quanto fica|valor|preço|preco|taxa)/i.test(t) && t.length < 25) return false;
+
+  return false;
+}
 
 // ===============================
 // ADDRESS FLOW (GUIADO + CEP + GPS) por telefone
@@ -630,12 +661,30 @@ router.post("/webhook", async (req, res) => {
       return;
     }
 
-    // 6) Se não escolheu pagamento, pergunta
-    if (!customer.preferredPayment) {
-      await askPaymentButtons(from);
-      return;
-    }
+// 6) Captura pedido antes de ficar perguntando tudo (evita loop "quero pizza rápido quanto fica")
+if (!looksLikeAddress(userText)) {
+  if (looksLikeOrderIntent(userText)) {
+    setDraft(from, userText);
+  }
+}
 
+// Se o cliente ainda NÃO passou pedido, pede o pedido primeiro (sem travar)
+const draft = getDraft(from);
+if (!draft && customer.lastFulfillment && customer.lastFulfillment !== "entrega") {
+  // retirada: pode pedir pedido direto
+  await sendText(from, "Fechado 🙌 Qual pizza você quer? (sabor + tamanho, ou meia a meia)");
+  return;
+}
+if (!draft && customer.lastFulfillment === "entrega" && !customer.lastAddress) {
+  // entrega mas sem pedido ainda
+  await sendText(from, "Top! Qual pizza você quer? (sabor + tamanho). Depois eu pego o endereço pra calcular a taxa 😊");
+  return;
+}
+if (!draft && !customer.lastFulfillment) {
+  // nem pediu nem escolheu entrega/retirada — pede o pedido primeiro
+  await sendText(from, "Fechado 🙌 Qual pizza você quer? (sabor + tamanho, ou meia a meia)");
+  return;
+}
     // 7) Endereço (só se entrega)
     let delivery = null;
     if (customer.lastFulfillment === "entrega") {
@@ -656,7 +705,7 @@ router.post("/webhook", async (req, res) => {
         return;
       }
 
-      if (!delivery?.ok) {
+      if (!delivery?.ok && (looksLikeAddress(userText) || getAF(from).step)) {
         const af = getAF(from);
         const t = String(userText || "").trim();
 
@@ -773,7 +822,11 @@ router.post("/webhook", async (req, res) => {
         await sendText(from, "Show! Qual é o *bairro*? 😊");
         return;
       }
-
+// 7.9) Se não escolheu pagamento, pergunta (só depois de endereço OK)
+if (!customer.preferredPayment) {
+  await askPaymentButtons(from);
+  return;
+}
     // 8) Cérebro (IA) com DISC + fala humana
     const [menu, merchant, configPix] = await Promise.all([
       getMenu(),

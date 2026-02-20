@@ -768,17 +768,14 @@ if (!draft && !customer.lastFulfillment) {
     await sendText(from, "Show! Qual é o *bairro*? 😊");
     return;
   }
+      // CEP -> pergunta número
+const cep = extractCep(t);
+if (cep) {
+  af.cep = cep;
+  af.step = "ASK_NUMBER";
+  await sendText(from, "Perfeito ✅ Qual o *número* da casa?");
+  return;
 }
-
-        // CEP -> pergunta número
-        const cep = extractCep(t);
-        if (cep) {
-          af.cep = cep;
-          af.step = "ASK_NUMBER";
-          await sendText(from, "Perfeito ✅ Qual o *número* da casa?");
-          return;
-        }
-
         // Se já está no fluxo guiado
         if (af.step === "ASK_NUMBER") {
           const n = extractHouseNumber(t);

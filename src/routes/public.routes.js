@@ -811,7 +811,53 @@ router.post("/webhook", async (req, res) => {
       await sendText(from, "Antes de fechar 😊 qual seu *nome*?");
       return;
     }
+// ==========================================
+// BUSCA DIRETA DE SABOR NO CARDÁPIO
+// ==========================================
+if (msg.type === "text" && userText) {
+  const base = ENV.CARDAPIOWEB_BASE_URL || "https://integracao.cardapioweb.com";
+  const url = `${base}/api/partner/v1/catalog`;
 
+  try {
+    const resp = await fetch(url, {
+      headers: {
+        "X-API-KEY": ENV.CARDAPIOWEB_TOKEN,
+        Accept: "application/json",
+      },
+    });
+
+    const data = await resp.json().catch(() => null);
+
+    if (resp.ok && data?.categories) {
+      const search = userText.toLowerCase();
+      let foundItem = null;
+
+      for (const cat of data.categories) {
+        if (cat?.status !== "ACTIVE") continue;
+
+        for (const item of cat.items || []) {
+          if (item?.status !== "ACTIVE") continue;
+
+          if (item.name.toLowerCase().includes(search)) {
+            foundItem = item;
+            break;
+          }
+        }
+        if (foundItem) break;
+      }
+
+      if (foundItem) {
+        await sendText(
+          from,
+          `Temos sim 😊\n\n🍕 *${foundItem.name}*\nValor: R$ ${Number(foundItem.price).toFixed(2)}\n\nVocê quer ela de 8 ou 16 fatias?`
+        );
+        return;
+      }
+    }
+  } catch (e) {
+    console.log("Busca específica falhou:", e.message);
+  }
+}
     // --------------------------
     // 9) Cérebro (IA) — com roteiro e sem quebrar fluxo
     // --------------------------

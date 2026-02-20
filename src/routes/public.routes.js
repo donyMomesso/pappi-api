@@ -9,7 +9,9 @@ const { getUpsellHint } = require("../services/upsell.service");
 const { quoteDeliveryIfPossible, MAX_KM } = require("../services/deliveryQuote.service");
 const { createPixCharge } = require("../services/interPix.service");
 
-// Node 18+ / Render / Node 22 tem fetch global
+// NOVO: Serviço de Criação de Pedidos Cardápio Web
+const { createOrder } = require("../services/cardapioWeb.service");
+
 const router = express.Router();
 const prisma = new PrismaClient();
 
@@ -51,7 +53,7 @@ function detectLoop(phone) {
 // ===================================================
 // HANDOFF (modo humano)
 // ===================================================
-const handoffMemory = new Map(); // phone -> { on: true, at: ts }
+const handoffMemory = new Map();
 
 function isHandoffOn(phone, customer) {
   if (customer && customer.handoff === true) return true;
@@ -61,22 +63,16 @@ function isHandoffOn(phone, customer) {
 
 async function setHandoffOn(phone) {
   handoffMemory.set(phone, { on: true, at: Date.now() });
-  await prisma.customer
-    .update({
-      where: { phone },
-      data: { handoff: true, handoffAt: new Date(), lastInteraction: new Date() },
-    })
-    .catch(() => null);
+  await prisma.customer.update({
+    where: { phone }, data: { handoff: true, handoffAt: new Date(), lastInteraction: new Date() },
+  }).catch(() => null);
 }
 
 async function clearHandoff(phone) {
   handoffMemory.delete(phone);
-  await prisma.customer
-    .update({
-      where: { phone },
-      data: { handoff: false, lastInteraction: new Date() },
-    })
-    .catch(() => null);
+  await prisma.customer.update({
+    where: { phone }, data: { handoff: false, lastInteraction: new Date() },
+  }).catch(() => null);
 }
 
 // ===================================================
@@ -99,30 +95,18 @@ async function askDeescalationButtons(to) {
   ]);
 }
 
-// ===================================================
-// Pergunta nome só 1x por sessão
-// ===================================================
 const askedName = new Set();
+const orderDraft = new Map(); 
 
-// ===================================================
-// Rascunho simples do pedido (pra não perder)
-// ===================================================
-const orderDraft = new Map(); // phone -> { text, updatedAt }
+function getDraft(phone) { return orderDraft.get(phone) || null; }
+function setDraft(phone, text) { orderDraft.set(phone, { text: String(text || "").slice(0, 700), updatedAt: Date.now() }); }
+function clearDraft(phone) { orderDraft.delete(phone); }
 
-function getDraft(phone) {
-  return orderDraft.get(phone) || null;
-}
-function setDraft(phone, text) {
-  orderDraft.set(phone, { text: String(text || "").slice(0, 700), updatedAt: Date.now() });
-}
-function clearDraft(phone) {
-  orderDraft.delete(phone);
-}
 function looksLikeOrderIntent(text) {
   const t = String(text || "").toLowerCase().trim();
   if (!t) return false;
   if (/(quero|pedir|fecha|fechar|vou querer|manda|me vê)/i.test(t)) return true;
-  if (/(pizza|calabresa|mussarela|frango|portuguesa|4 queijos|quatro queijos|meia|metade|borda|grande|m[eé]dia|pequena|familia|família)/i.test(t)) return true;
+  if (/(pizza|calabresa|mussarela|frango|portuguesa|4 queijos|quatro queijos|meia|metade|borda|grande|m[eé]dia|pequena)/i.test(t)) return true;
   if (/(quanto|valor|preço|preco|taxa)/i.test(t) && t.length < 30) return false;
   return false;
 }
@@ -130,33 +114,20 @@ function looksLikeOrderIntent(text) {
 // ===================================================
 // Helpers texto / endereço
 // ===================================================
-function digitsOnly(str) {
-  return String(str || "").replace(/\D/g, "");
-}
-function extractCep(text) {
-  const d = digitsOnly(text);
-  return d.length === 8 ? d : null;
-}
-function extractHouseNumber(text) {
-  const m = String(text || "").match(/\b\d{1,5}\b/);
-  return m ? m[0] : null;
-}
-function looksLikeNoComplement(text) {
-  return /^(sem|não tem|nao tem)\s*(complemento)?$/i.test(String(text || "").trim());
-}
+function digitsOnly(str) { return String(str || "").replace(/\D/g, ""); }
+function extractCep(text) { const d = digitsOnly(text); return d.length === 8 ? d : null; }
+function extractHouseNumber(text) { const m = String(text || "").match(/\b\d{1,5}\b/); return m ? m[0] : null; }
+function looksLikeNoComplement(text) { return /^(sem|não tem|nao tem)\s*(complemento)?$/i.test(String(text || "").trim()); }
+
 function looksLikeAddress(text) {
   const t = String(text || "").toLowerCase().trim();
   if (!t) return false;
-
   if (extractCep(t)) return true;
-
   const hasStreetWord = /(rua|r\.|avenida|av\.|travessa|tv\.|alameda|rodovia|estrada|praça|praca|bairro|n[ºo]\b|n\.)/i.test(t);
   const hasNumber = /\b\d{1,5}\b/.test(t);
-
   const isIntentPhrase = /(pizza|quanto|preço|preco|valor|card[aá]pio|menu|promo|rápido|rapido)/i.test(t);
   if (isIntentPhrase && !hasStreetWord) return false;
-
-  return (hasStreetWord && hasNumber) || (hasStreetWord && t.length >= 10) || (hasNumber && t.length > 15);
+  return (hasStreetWord && hasNumber) || (hasStreetWord && t.length >= 10);
 }
 
 // ===================================================
@@ -164,18 +135,13 @@ function looksLikeAddress(text) {
 // ===================================================
 function extractNameLight(text) {
   const t = String(text || "").trim();
-
-  // se for só um nome
   if (/^[A-Za-zÀ-ÿ]+(?:\s+[A-Za-zÀ-ÿ]+){0,2}$/.test(t) && t.length >= 2) {
     if (/^(sim|nao|não|ok|blz|beleza|oi|ola|olá)$/i.test(t)) return null;
     return t.slice(0, 60);
   }
-
-  // "meu nome é X"
   const m = t.match(/(?:meu nome é|aqui é o|aqui é a|sou o|sou a|me chamo)\s+([A-Za-zÀ-ÿ]+(?:\s+[A-Za-zÀ-ÿ]+){0,2})/i);
   const name = m?.[1]?.trim();
   if (!name || name.length < 2) return null;
-
   return name.slice(0, 60);
 }
 
@@ -183,10 +149,8 @@ function looksLikeGarbageName(name) {
   const n = String(name || "").trim();
   if (n.length < 2) return true;
   const vowels = (n.match(/[aeiouáàâãéèêíìîóòôõúùû]/gi) || []).length;
-  if (vowels < 1) return true;
+  if (vowels < 2) return true;
   if (/(.)\1\1/.test(n)) return true;
-  // evita tokens aleatórios tipo "opipojpo"
-  if (n.length >= 6 && vowels === 1) return true;
   return false;
 }
 
@@ -216,10 +180,7 @@ function shouldAskName(phone, customer) {
 // WhatsApp Cloud API helpers
 // ===================================================
 async function waSend(payload) {
-  if (!ENV.WHATSAPP_TOKEN || !ENV.WHATSAPP_PHONE_NUMBER_ID) {
-    console.error("❌ WHATSAPP_TOKEN ou WHATSAPP_PHONE_NUMBER_ID não configurado.");
-    return;
-  }
+  if (!ENV.WHATSAPP_TOKEN || !ENV.WHATSAPP_PHONE_NUMBER_ID) return;
   const url = `https://graph.facebook.com/v24.0/${ENV.WHATSAPP_PHONE_NUMBER_ID}/messages`;
   await fetch(url, {
     method: "POST",
@@ -229,21 +190,11 @@ async function waSend(payload) {
 }
 
 async function sendText(to, text) {
-  return waSend({
-    messaging_product: "whatsapp",
-    to: digitsOnly(to),
-    type: "text",
-    text: { body: String(text || "").slice(0, 3500) },
-  });
+  return waSend({ messaging_product: "whatsapp", to: digitsOnly(to), type: "text", text: { body: String(text || "").slice(0, 3500) } });
 }
 
 async function sendImage(to, imageUrl, caption) {
-  return waSend({
-    messaging_product: "whatsapp",
-    to: digitsOnly(to),
-    type: "image",
-    image: { link: imageUrl, caption: caption ? String(caption).slice(0, 1000) : undefined },
-  });
+  return waSend({ messaging_product: "whatsapp", to: digitsOnly(to), type: "image", image: { link: imageUrl, caption: caption ? String(caption).slice(0, 1000) : undefined } });
 }
 
 async function sendButtons(to, bodyText, buttons) {
@@ -251,46 +202,29 @@ async function sendButtons(to, bodyText, buttons) {
     messaging_product: "whatsapp",
     to: digitsOnly(to),
     type: "interactive",
-    interactive: {
-      type: "button",
-      body: { text: bodyText },
-      action: {
-        buttons: buttons.slice(0, 3).map((b) => ({
-          type: "reply",
-          reply: { id: String(b.id), title: String(b.title).slice(0, 20) },
-        })),
-      },
-    },
+    interactive: { type: "button", body: { text: bodyText }, action: { buttons: buttons.slice(0, 3).map((b) => ({ type: "reply", reply: { id: String(b.id), title: String(b.title).slice(0, 20) } })) } },
   });
 }
 
 async function askFulfillmentButtons(to) {
-  return sendButtons(to, "Pra agilizar 😊 é *Entrega* ou *Retirada*?", [
-    { id: "FULFILLMENT_ENTREGA", title: "🚚 Entrega" },
-    { id: "FULFILLMENT_RETIRADA", title: "🏪 Retirada" },
-  ]);
+  return sendButtons(to, "Pra agilizar 😊 é *Entrega* ou *Retirada*?", [{ id: "FULFILLMENT_ENTREGA", title: "🚚 Entrega" }, { id: "FULFILLMENT_RETIRADA", title: "🏪 Retirada" }]);
 }
 
 async function askPaymentButtons(to) {
-  return sendButtons(to, "E o pagamento vai ser como? 💳", [
-    { id: "PAY_PIX", title: "⚡ PIX" },
-    { id: "PAY_CARTAO", title: "💳 Cartão" },
-    { id: "PAY_DINHEIRO", title: "💵 Dinheiro" },
-  ]);
+  return sendButtons(to, "E o pagamento vai ser como? 💳", [{ id: "PAY_PIX", title: "⚡ PIX" }, { id: "PAY_CARTAO", title: "💳 Cartão" }, { id: "PAY_DINHEIRO", title: "💵 Dinheiro" }]);
 }
 
 // ===================================================
 // Address Flow (GUIADO + CEP + GPS)
 // ===================================================
-const addressFlow = new Map(); // phone -> { step, street, number, bairro, cep, complemento, pending, delivery }
+const addressFlow = new Map(); 
 
 function getAF(phone) {
   if (!addressFlow.has(phone)) addressFlow.set(phone, { step: null });
   return addressFlow.get(phone);
 }
-function resetAF(phone) {
-  addressFlow.set(phone, { step: null });
-}
+function resetAF(phone) { addressFlow.set(phone, { step: null }); }
+
 function buildAddressText(af) {
   const parts = [];
   if (af.street) parts.push(af.street);
@@ -302,29 +236,18 @@ function buildAddressText(af) {
 }
 
 async function safeQuote(addressText) {
-  try {
-    return await quoteDeliveryIfPossible(addressText);
-  } catch (e1) {
-    try {
-      return await quoteDeliveryIfPossible({ addressText });
-    } catch (e2) {
-      return null;
-    }
+  try { return await quoteDeliveryIfPossible(addressText); } 
+  catch (e1) { 
+    try { return await quoteDeliveryIfPossible({ addressText }); } 
+    catch (e2) { return null; } 
   }
 }
 
 async function reverseGeocodeLatLng(lat, lng) {
   if (!ENV.GOOGLE_MAPS_API_KEY) return null;
-
-  const url =
-    `https://maps.googleapis.com/maps/api/geocode/json?` +
-    `latlng=${lat},${lng}` +
-    `&key=${ENV.GOOGLE_MAPS_API_KEY}` +
-    `&language=pt-BR`;
-
+  const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${ENV.GOOGLE_MAPS_API_KEY}&language=pt-BR&result_type=street_address|premise|subpremise|route`;
   const resp = await fetch(url).catch(() => null);
   if (!resp) return null;
-
   const data = await resp.json().catch(() => null);
   return data?.results?.[0]?.formatted_address || null;
 }
@@ -333,55 +256,31 @@ async function askAddressConfirm(to, formatted, delivery) {
   const feeTxt = delivery?.fee != null ? `R$ ${Number(delivery.fee).toFixed(2)}` : "a confirmar";
   const kmTxt = Number.isFinite(delivery?.km) ? `${delivery.km.toFixed(1)} km` : "";
   const txt = `Confere o endereço? 📍\n*${formatted}*\nTaxa: *${feeTxt}*${kmTxt ? ` | ${kmTxt}` : ""}`;
-
-  return sendButtons(to, txt, [
-    { id: "ADDR_CONFIRM", title: "✅ Confirmar" },
-    { id: "ADDR_CORRECT", title: "✏️ Corrigir" },
-  ]);
+  return sendButtons(to, txt, [{ id: "ADDR_CONFIRM", title: "✅ Confirmar" }, { id: "ADDR_CORRECT", title: "✏️ Corrigir" }]);
 }
 
-// ===================================================
-// IA (Gemini) - robusto contra 429 (quota) CIRCUIT BREAKER
-// ===================================================
+// ===============================
+// IA (Gemini) - RÁPIDA E EFICIENTE (JSON Output mode)
+// ===============================
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
 let cachedGeminiModel = null;
-
-// circuit breaker
 let geminiDisabledUntil = 0;
-function isGeminiDisabled() {
-  return Date.now() < geminiDisabledUntil;
-}
-function disableGeminiFor(ms) {
-  geminiDisabledUntil = Date.now() + ms;
-}
+
+function isGeminiDisabled() { return Date.now() < geminiDisabledUntil; }
+function disableGeminiFor(ms) { geminiDisabledUntil = Date.now() + ms; }
 
 async function listGeminiModels() {
   const apiKey = ENV.GEMINI_API_KEY || "";
   if (!apiKey) throw new Error("GEMINI_API_KEY não configurada.");
-
-  const resp = await fetch(`${GEMINI_API_BASE}/models`, {
-    headers: { "x-goog-api-key": apiKey },
-  });
-
-  if (!resp.ok) {
-    const txt = await resp.text().catch(() => "");
-    throw new Error(`ListModels failed: ${resp.status} ${txt}`);
-  }
+  const resp = await fetch(`${GEMINI_API_BASE}/models`, { headers: { "x-goog-api-key": apiKey } });
+  if (!resp.ok) return [];
   const data = await resp.json();
   return data.models || [];
 }
 
 function pickGeminiModel(models) {
   const supported = models.filter((m) => (m.supportedGenerationMethods || []).includes("generateContent"));
-
-  // prioriza modelos menos rateados
-  const preferred = [
-    (ENV.GEMINI_MODEL || "").replace(/^models\//, ""),
-    "gemini-2.0-flash",
-    "gemini-2.5-flash",
-    "gemini-2.5-pro",
-  ].filter(Boolean);
-
+  const preferred = [(ENV.GEMINI_MODEL || "").replace(/^models\//, ""), "gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro"].filter(Boolean);
   for (const name of preferred) {
     const full = name.startsWith("models/") ? name : `models/${name}`;
     const found = supported.find((m) => m.name === full);
@@ -396,195 +295,124 @@ async function ensureGeminiModel(forceRefresh = false) {
   const picked = pickGeminiModel(models);
   if (!picked) throw new Error("Nenhum modelo com generateContent disponível.");
   cachedGeminiModel = picked;
-  console.log("🤖 Gemini model selecionado:", cachedGeminiModel);
   return cachedGeminiModel;
 }
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 async function geminiGenerate(content) {
   if (isGeminiDisabled()) {
-    const e = new Error("gemini_disabled_temporarily");
-    e.code = "GEMINI_DISABLED";
-    throw e;
+    const e = new Error("gemini_disabled_temporarily"); e.code = "GEMINI_DISABLED"; throw e;
   }
-
   const apiKey = ENV.GEMINI_API_KEY || "";
   let model = await ensureGeminiModel(false);
-
-  const body = Array.isArray(content)
-    ? { contents: [{ parts: content }] }
-    : { contents: [{ parts: [{ text: String(content || "") }] }] };
+  const body = Array.isArray(content) ? { contents: [{ parts: content }] } : { contents: [{ parts: [{ text: String(content || "") }] }] };
 
   for (let attempt = 1; attempt <= 2; attempt++) {
     const resp = await fetch(`${GEMINI_API_BASE}/${model}:generateContent`, {
-      method: "POST",
-      headers: { "x-goog-api-key": apiKey, "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      method: "POST", headers: { "x-goog-api-key": apiKey, "Content-Type": "application/json" }, body: JSON.stringify(body),
     });
-
     const data = await resp.json().catch(() => ({}));
-    if (resp.ok) {
-      return data?.candidates?.[0]?.content?.parts?.map((p) => p.text).filter(Boolean).join("") || "";
-    }
+    if (resp.ok) return data?.candidates?.[0]?.content?.parts?.map((p) => p.text).filter(Boolean).join("") || "";
 
     if (resp.status === 429) {
-      console.error("❌ Gemini falhou (429):", JSON.stringify(data));
-      const retryDelaySec =
-        Number(String(data?.error?.details?.find?.((d) => d?.retryDelay)?.retryDelay || "").replace("s", "")) || 10;
-
-      if (attempt === 1) {
-        await ensureGeminiModel(true);
-        model = cachedGeminiModel;
-        await sleep(Math.min(retryDelaySec * 1000, 15000));
-        continue;
+      console.error("❌ Gemini falhou (429): Rate Limit Esgotado.");
+      const retryDelaySec = Number(String(data?.error?.details?.find?.((d) => d?.retryDelay)?.retryDelay || "").replace("s", "")) || 10;
+      if (attempt === 1 && retryDelaySec <= 4) {
+        await ensureGeminiModel(true); model = cachedGeminiModel; await sleep(retryDelaySec * 1000); continue;
       }
-
       disableGeminiFor(2 * 60 * 1000);
-      const e = new Error("gemini_quota_exceeded");
-      e.code = 429;
-      throw e;
+      const e = new Error("gemini_quota_exceeded"); e.code = 429; throw e;
     }
-
-    console.error("❌ Gemini falhou:", resp.status, JSON.stringify(data));
-    const e = new Error(`generateContent failed: ${resp.status}`);
-    e.code = resp.status;
-    throw e;
+    const e = new Error(`generateContent failed: ${resp.status}`); e.code = resp.status; throw e;
   }
-
   return "";
 }
 
 // ===================================================
-// CardapioWeb (com CACHE pra não “sumir”)
+// CACHE DO CARDAPIOWEB 
 // ===================================================
-const menuCache = { text: null, at: 0 };
-const merchantCache = { obj: null, at: 0 };
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5 min
+let menuCache = { data: null, raw: null, timestamp: 0 };
+let merchantCache = { data: null, obj: null, timestamp: 0 };
+const CACHE_TTL = 5 * 60 * 1000;
 
 async function getMenu() {
-  if (menuCache.text && Date.now() - menuCache.at < CACHE_TTL_MS) return menuCache.text;
-
+  if (menuCache.data && Date.now() - menuCache.timestamp < CACHE_TTL) return menuCache.data;
   const base = ENV.CARDAPIOWEB_BASE_URL || "https://integracao.cardapioweb.com";
-  const url = `${base}/api/partner/v1/catalog`;
-
   try {
-    const resp = await fetch(url, { headers: { "X-API-KEY": ENV.CARDAPIOWEB_TOKEN, Accept: "application/json" } });
-    const data = await resp.json().catch(() => null);
-    if (!data?.categories) throw new Error("no_categories");
-
+    const resp = await fetch(`${base}/api/partner/v1/catalog`, { headers: { "X-API-KEY": ENV.CARDAPIOWEB_TOKEN, Accept: "application/json" } });
+    const data = await resp.json();
+    if (!data?.categories) return "Cardápio indisponível.";
     let txt = "🍕 MENU PAPPI:\n";
     data.categories.forEach((cat) => {
       if (cat?.status === "ACTIVE") {
-        txt += `\n${String(cat.name || "CATEGORIA").toUpperCase()}\n`;
+        txt += `\n[CATEGORIA: ${String(cat.name || "N/A").toUpperCase()}]\n`;
         (cat.items || []).forEach((i) => {
           if (i?.status === "ACTIVE") {
             const price = Number(i.price);
-            const priceTxt = Number.isFinite(price) ? price.toFixed(2) : "0.00";
-            txt += `- ${i.name} (R$ ${priceTxt})\n`;
+            txt += `- ID:${i.id} | ${i.name} | R$ ${Number.isFinite(price) ? price.toFixed(2) : "0.00"}\n`;
+            if(i.options && i.options.length > 0){
+               i.options.forEach(opt => {
+                   if(opt.status === "ACTIVE"){
+                        txt += `  -- Opção ID:${opt.id} | ${opt.name} | R$ ${Number(opt.price).toFixed(2)}\n`;
+                   }
+               });
+            }
           }
         });
       }
     });
-
-    menuCache.text = txt.trim();
-    menuCache.at = Date.now();
-    return menuCache.text;
-  } catch (e) {
-    console.error("❌ getMenu erro:", e?.message || e);
-    if (menuCache.text) return menuCache.text;
-    return "Cardápio indisponível agora. Veja aqui: " + LINK_CARDAPIO;
-  }
+    menuCache = { data: txt.trim(), raw: data, timestamp: Date.now() };
+    return menuCache.data;
+  } catch (e) { return "Cardápio indisponível."; }
 }
 
 async function getMerchant() {
-  if (merchantCache.obj && Date.now() - merchantCache.at < CACHE_TTL_MS) return merchantCache.obj;
-
+  if (merchantCache.data && Date.now() - merchantCache.timestamp < CACHE_TTL) return merchantCache.data;
   const base = ENV.CARDAPIOWEB_BASE_URL || "https://integracao.cardapioweb.com";
-  const url = `${base}/api/partner/v1/merchant`;
-
   try {
-    const resp = await fetch(url, { headers: { "X-API-KEY": ENV.CARDAPIOWEB_TOKEN, Accept: "application/json" } });
-    const data = await resp.json().catch(() => null);
-    merchantCache.obj = data;
-    merchantCache.at = Date.now();
-    return data;
-  } catch (e) {
-    console.error("❌ getMerchant erro:", e?.message || e);
-    return merchantCache.obj;
-  }
+    const resp = await fetch(`${base}/api/partner/v1/merchant`, { headers: { "X-API-KEY": ENV.CARDAPIOWEB_TOKEN, Accept: "application/json" } });
+    const data = await resp.json();
+    merchantCache = { data: normalizePayments(data), obj: data, timestamp: Date.now() };
+    return merchantCache.data;
+  } catch (e) { return null; }
 }
 
 function normalizePayments(merchant) {
-  const raw =
-    merchant?.métodos_de_pagamento ||
-    merchant?.metodos_de_pagamento ||
-    merchant?.payment_methods ||
-    merchant?.payments ||
-    null;
-
+  const raw = merchant?.métodos_de_pagamento || merchant?.metodos_de_pagamento || merchant?.payment_methods || merchant?.payments || null;
   if (!Array.isArray(raw)) return "PIX, Cartão, Dinheiro";
-
-  const names = raw
-    .filter((p) => p && (p.ativo === true || p.active === true || p.enabled === true || p.status === "ACTIVE"))
-    .map((p) => p?.método_de_pagamento || p?.metodo_de_pagamento || p?.name || p?.method || p?.type)
-    .filter(Boolean);
-
-  return names.length ? names.join(", ") : "PIX, Cartão, Dinheiro";
+  const names = raw.filter((p) => p && (p.ativo === true || p.active === true || p.enabled === true || p.status === "ACTIVE"))
+                   .map((p) => `ID:${p.id} - ${p?.name || p?.método_de_pagamento || p?.metodo_de_pagamento || p?.method || p?.type}`).filter(Boolean);
+  return names.length ? names.join(" | ") : "PIX, Cartão, Dinheiro";
 }
 
 function normalizeAddress(merchant) {
   const addr = merchant?.endereço || merchant?.endereco || merchant?.address || null;
   if (!addr) return "Campinas-SP";
-  const rua = addr?.rua || addr?.street || "";
-  const numero = addr?.número || addr?.numero || addr?.number || "";
-  const bairro = addr?.bairro || addr?.district || "";
-  const parts = [rua, numero, bairro].filter(Boolean).join(", ");
-  return parts || "Campinas-SP";
+  return [addr?.rua || addr?.street, addr?.número || addr?.numero || addr?.number, addr?.bairro || addr?.district].filter(Boolean).join(", ") || "Campinas-SP";
 }
 
 // ===================================================
-// Resposta determinística: “tem X?” consultando MENU real
+// Helper - Construtor de Endereço Cardápio Web
 // ===================================================
-function normalizeForSearch(s) {
-  return String(s || "")
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-z0-9\s]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+function buildDeliveryAddressObject(af, lat, lng) {
+    if(!af) return null;
+    return {
+        state: "SP", // Assumido pelo prompt
+        city: "Campinas",
+        neighborhood: af.bairro || "Centro",
+        street: af.street || "Rua não informada",
+        number: af.number || "S/N",
+        complement: af.complemento || "",
+        reference: "",
+        postal_code: af.cep || "00000000",
+        coordinates: {
+            latitude: Number(lat) || 0,
+            longitude: Number(lng) || 0
+        }
+    };
 }
 
-function extractHasQuestion(text) {
-  const t = normalizeForSearch(text);
-  const m = t.match(/\btem\b\s+(.+?)\??$/i);
-  if (!m) return null;
-  let q = (m[1] || "").trim();
-  q = q.replace(/\b(pizza|pizzas|ai|aí|pra|por favor|pf|no cardapio|no cardápio)\b/g, "").trim();
-  if (!q || q.length < 3) return null;
-  return q.slice(0, 60);
-}
-
-function menuFindItems(menuText, query) {
-  const q = normalizeForSearch(query);
-  const words = q.split(" ").filter(Boolean);
-  if (!words.length) return [];
-
-  const lines = String(menuText || "").split("\n");
-  const hits = [];
-
-  for (const line of lines) {
-    const ln = normalizeForSearch(line);
-    if (words.every((w) => ln.includes(w))) {
-      hits.push(line.replace(/^\-\s*/, "").trim());
-      if (hits.length >= 5) break;
-    }
-  }
-  return hits;
-}
 
 // ===================================================
 // Rotas básicas
@@ -599,24 +427,31 @@ router.post("/webhook/inter", async (req, res) => {
   res.sendStatus(200);
   const pagamentos = req.body;
   if (!pagamentos || !Array.isArray(pagamentos)) return;
-
   try {
     for (const pag of pagamentos) {
       console.log(`💰 PIX RECEBIDO! TXID: ${pag.txid} | Valor: R$ ${pag.valor}`);
-
       const order = await prisma.order.findFirst({ where: { displayId: pag.txid } });
       if (!order) continue;
-
+      
       await prisma.order.update({ where: { id: order.id }, data: { status: "confirmed" } });
-
       const customer = await prisma.customer.findUnique({ where: { id: order.customerId } });
+      
       if (customer?.phone) {
-        await sendText(customer.phone, `✅ Pagamento confirmado! Recebemos R$ ${pag.valor}.\nPedido enviado pra cozinha 🍕👨‍🍳`);
+        await sendText(customer.phone, `✅ *Pagamento confirmado!* Recebemos R$ ${pag.valor}.\nO seu pedido já foi enviado para a cozinha! 🍕👨‍🍳`);
+        
+        // Se o pedido tiver o JSON guardado, envia para a Cardápio Web
+        if(order.cwJson){
+             try{
+                 const parsedData = JSON.parse(order.cwJson);
+                 await createOrder(parsedData);
+                 console.log("✅ Pedido injetado no Cardapio Web após PIX com sucesso!");
+             } catch(e){
+                 console.error("❌ Falha ao injetar pedido PIX no Cardapio Web:", e);
+             }
+        }
       }
     }
-  } catch (error) {
-    console.error("🔥 Erro webhook Inter:", error);
-  }
+  } catch (error) { console.error("🔥 Erro webhook Inter:", error); }
 });
 
 // ===================================================
@@ -624,168 +459,49 @@ router.post("/webhook/inter", async (req, res) => {
 // ===================================================
 router.post("/webhook", async (req, res) => {
   res.sendStatus(200);
-
   const msg = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
   if (!msg) return;
   if (alreadyProcessed(msg.id)) return;
-
   const from = msg.from;
 
   try {
     let customer = await prisma.customer.findUnique({ where: { phone: from } }).catch(() => null);
     if (!customer) customer = await prisma.customer.create({ data: { phone: from } });
 
-    // Se está em handoff, o bot NÃO responde
     if (isHandoffOn(from, customer)) return;
 
-    // ===========================
-    // 1) INTERACTIVE (BOTÕES)
-    // ===========================
     if (msg.type === "interactive") {
       const btnId = msg?.interactive?.button_reply?.id || null;
-
-      if (btnId === "HELP_HUMAN") {
-        pushHistory(from, "user", "BOTÃO: atendente");
-        await setHandoffOn(from);
-        await sendText(from, "Perfeito ✅ Já chamei um atendente pra continuar aqui com você. Só um instantinho 😊");
-        return;
-      }
-
-      if (btnId === "HELP_BOT") {
-        pushHistory(from, "user", "BOTÃO: continuar");
-        await sendText(from, "Fechado ✅ Vou te atender por aqui.");
-        await askFulfillmentButtons(from);
-        return;
-      }
-
-      // ✅ Entrega/Retirada (limpa endereço quando vira retirada)
-      if (btnId === "FULFILLMENT_ENTREGA" || btnId === "FULFILLMENT_RETIRADA") {
-        const v = btnId === "FULFILLMENT_ENTREGA" ? "entrega" : "retirada";
-        customer = await prisma.customer.update({
-          where: { phone: from },
-          data: {
-            lastFulfillment: v,
-            lastInteraction: new Date(),
-            lastAddress: v === "retirada" ? null : customer.lastAddress,
-          },
-        });
-        pushHistory(from, "user", `BOTÃO: ${v}`);
-      }
-
-      if (btnId === "PAY_PIX" || btnId === "PAY_CARTAO" || btnId === "PAY_DINHEIRO") {
-        const v = btnId === "PAY_PIX" ? "pix" : btnId === "PAY_CARTAO" ? "cartao" : "dinheiro";
-        customer = await prisma.customer.update({
-          where: { phone: from },
-          data: { preferredPayment: v, lastInteraction: new Date() },
-        });
-        pushHistory(from, "user", `BOTÃO: pagamento ${v}`);
-      }
-
-      if (btnId === "ADDR_CONFIRM") {
-        const af = getAF(from);
-        const formatted = af?.pending?.formatted || null;
-
-        if (formatted) {
-          await prisma.customer
-            .update({
-              where: { phone: from },
-              data: { lastAddress: String(formatted).slice(0, 200), lastInteraction: new Date() },
-            })
-            .catch(() => null);
-          pushHistory(from, "user", `ENDEREÇO CONFIRMADO: ${formatted}`);
-        }
-
-        resetAF(from);
-        await sendText(from, "Fechado ✅ Agora me diga seu pedido 🍕 (tamanho + sabor, ou meia a meia)");
-        return;
-      }
-
-      if (btnId === "ADDR_CORRECT") {
-        resetAF(from);
-        await sendText(from, "Me manda *CEP* ou *Rua + Número + Bairro* (ou sua localização 📍).");
-        return;
-      }
-
-      // ✅ Depois de qualquer botão: se faltou Fulfillment, pergunta
-      if (!customer.lastFulfillment) {
-        await askFulfillmentButtons(from);
-        return;
-      }
-
-      // ✅ Se Entrega e não tem endereço, pede
-      if (customer.lastFulfillment === "entrega" && !customer.lastAddress) {
-        await sendText(from, "Pra entrega, me manda *CEP* ou *Rua + Número + Bairro* (ou sua localização 📍) pra eu calcular a taxa 😊");
-        return;
-      }
-
-      // ✅ Se não tem pagamento ainda, pede
-      if (!customer.preferredPayment) {
-        await askPaymentButtons(from);
-        return;
-      }
-
-      // ✅ Se não tem nome ainda, pede
-      if (!customer.name && shouldAskName(from, customer)) {
-        await sendText(from, "Show 😊 qual seu nome?");
-        return;
-      }
-
-      await sendText(from, "Fechado 🙌 Qual pizza você quer? (tamanho + sabor, ou meia a meia)");
-      return;
+      if (btnId === "HELP_HUMAN") { pushHistory(from, "user", "BOTÃO: atendente"); await setHandoffOn(from); await sendText(from, "Perfeito ✅ Já chamei um atendente pra continuar aqui com você. Só um instantinho 😊"); return; }
+      if (btnId === "HELP_BOT") { pushHistory(from, "user", "BOTÃO: continuar"); await sendText(from, "Fechado ✅ Vou te atender por aqui. É *Entrega* ou *Retirada*?"); await askFulfillmentButtons(from); return; }
+      if (btnId === "FULFILLMENT_ENTREGA" || btnId === "FULFILLMENT_RETIRADA") { const v = btnId === "FULFILLMENT_ENTREGA" ? "entrega" : "retirada"; customer = await prisma.customer.update({ where: { phone: from }, data: { lastFulfillment: v, lastInteraction: new Date() } }).catch(() => customer); pushHistory(from, "user", `BOTÃO: ${v}`); }
+      if (btnId === "PAY_PIX" || btnId === "PAY_CARTAO" || btnId === "PAY_DINHEIRO") { const v = btnId === "PAY_PIX" ? "pix" : btnId === "PAY_CARTAO" ? "cartao" : "dinheiro"; customer = await prisma.customer.update({ where: { phone: from }, data: { preferredPayment: v, lastInteraction: new Date() } }).catch(() => customer); pushHistory(from, "user", `BOTÃO: pagamento ${v}`); }
+      if (btnId === "ADDR_CONFIRM") { const af = getAF(from); const formatted = af?.pending?.formatted || null; if (formatted) { await prisma.customer.update({ where: { phone: from }, data: { lastAddress: String(formatted).slice(0, 200), lastInteraction: new Date() } }).catch(() => null); pushHistory(from, "user", `ENDEREÇO CONFIRMADO: ${formatted}`); } resetAF(from); await sendText(from, "Fechado ✅ Agora me diga seu pedido 🍕 (tamanho + sabor, ou meia a meia)"); return; }
+      if (btnId === "ADDR_CORRECT") { resetAF(from); await sendText(from, "Me manda *CEP* ou *Rua + Número + Bairro* (ou sua localização 📍)."); return; }
+      
+      if (!customer.name && !askedName.has(from)) { askedName.add(from); await sendText(from, "Show 😊 qual seu nome?"); return; }
+      if (!customer.lastFulfillment) { await askFulfillmentButtons(from); return; }
+      if (customer.lastFulfillment === "entrega" && !customer.lastAddress) { await sendText(from, "Pra entrega, me manda *CEP* ou *Rua + Número + Bairro* (ou sua localização 📍) pra eu calcular a taxa 😊"); return; }
+      
+      await sendText(from, "Fechado 🙌 Qual pizza você quer? (tamanho + sabor, ou meia a meia)"); return;
     }
 
-    // ===========================
-    // 2) LOCATION
-    // ===========================
     if (msg.type === "location") {
-      const lat = msg.location?.latitude;
-      const lng = msg.location?.longitude;
-
-      if (!lat || !lng) {
-        await sendText(from, "Não consegui ler sua localização 😕 Manda de novo?");
-        return;
-      }
-
-      if (!customer.lastFulfillment) {
-        customer = await prisma.customer
-          .update({ where: { phone: from }, data: { lastFulfillment: "entrega", lastInteraction: new Date() } })
-          .catch(() => customer);
-      }
-
+      const lat = msg.location?.latitude; const lng = msg.location?.longitude;
+      if (!lat || !lng) { await sendText(from, "Não consegui ler sua localização 😕 Manda de novo?"); return; }
+      if (!customer.lastFulfillment) { customer = await prisma.customer.update({ where: { phone: from }, data: { lastFulfillment: "entrega", lastInteraction: new Date() } }).catch(() => customer); }
       const formatted = await reverseGeocodeLatLng(lat, lng);
-
-      // ✅ Se reverse falhar, NÃO trava — confirma com fallback
-      if (!formatted) {
-        const fallback = `Localização recebida 📍 (GPS: ${lat}, ${lng})`;
-        const af = getAF(from);
-        af.pending = { formatted: fallback, lat, lng };
-        await askAddressConfirm(from, fallback, null);
-        return;
-      }
-
+      if (!formatted) { const fallback = `Localização recebida 📍 (GPS: ${lat}, ${lng})`; const af = getAF(from); af.pending = { formatted: fallback, lat, lng }; await askAddressConfirm(from, fallback, null); return; }
       const deliveryGPS = await safeQuote(formatted);
-      const af = getAF(from);
-      af.pending = { formatted, lat, lng };
-      af.delivery = deliveryGPS || null;
-
-      if (deliveryGPS?.ok && deliveryGPS.within === false) {
-        await sendText(from, `Ainda não entregamos aí (até ${MAX_KM} km). Quer *Retirada*?`);
-        return;
-      }
-
-      await askAddressConfirm(from, formatted, deliveryGPS || null);
-      return;
+      const af = getAF(from); af.pending = { formatted, lat, lng }; af.delivery = deliveryGPS || null;
+      if (deliveryGPS?.ok && deliveryGPS.within === false) { await sendText(from, `Ainda não entregamos aí (até ${MAX_KM} km). Quer *Retirada*?`); return; }
+      await askAddressConfirm(from, formatted, deliveryGPS || null); return;
     }
 
-    // ===========================
-    // 3) TEXT
-    // ===========================
     if (msg.type !== "text") return;
-
     const userText = msg.text?.body || "";
     if (!userText) return;
 
-    // Irritação / pedir humano / loop
     if (detectHumanRequest(userText) || detectIrritation(userText) || detectLoop(from)) {
       pushHistory(from, "user", userText);
       await sendText(from, "Entendi 🙏 desculpa a confusão. Vamos resolver agora.");
@@ -793,170 +509,74 @@ router.post("/webhook", async (req, res) => {
       return;
     }
 
-    // Atualiza customer (nome / entrega / pagamento)
     const nm = extractNameLight(userText);
     const ff = detectFulfillmentLight(userText);
     const pay = detectPaymentLight(userText);
-
     const dataToUpdate = { lastInteraction: new Date() };
     if (nm && !customer.name && !looksLikeGarbageName(nm)) dataToUpdate.name = nm;
     if (ff) dataToUpdate.lastFulfillment = ff;
     if (pay) dataToUpdate.preferredPayment = pay;
-
     customer = await prisma.customer.update({ where: { phone: from }, data: dataToUpdate }).catch(() => customer);
     pushHistory(from, "user", userText);
 
-    // ✅ SEMPRE pergunta Entrega/Retirada se não tiver
-    if (!customer.lastFulfillment) {
-      await askFulfillmentButtons(from);
-      return;
-    }
+    if (shouldAskName(from, customer) && /^(oi|olá|ola|sim|boa|boa noite|bom dia|boa tarde|menu)$/i.test(userText.trim())) { await sendText(from, "Pra eu te atender certinho 😊 me diz seu *nome*? (ex: Dony)"); return; }
+    if (!customer.name && nm && looksLikeGarbageName(nm)) { await sendText(from, "Me diz seu *nome* por favor? 😊 (ex: Dony)"); return; }
+    if (!customer.lastFulfillment) { await askFulfillmentButtons(from); return; }
 
-    // ✅ SEMPRE pergunta Nome (1x) se não tiver
-    if (!customer.name && shouldAskName(from, customer)) {
-      await sendText(from, "Pra eu te atender certinho 😊 me diz seu *nome*?");
-      return;
-    }
+    if (!looksLikeAddress(userText) && looksLikeOrderIntent(userText)) { setDraft(from, userText); }
+    const draft = getDraft(from);
 
-    // Rascunho pedido
-    if (!looksLikeAddress(userText) && looksLikeOrderIntent(userText)) setDraft(from, userText);
-
-    // ===================================================
-    // 4) ENDEREÇO (só se ENTREGA)
-    // ===================================================
     let deliveryInternal = `ENTREGA (interno): não aplicável`;
+    let currentFee = 0;
 
     if (customer.lastFulfillment === "entrega" && !customer.lastAddress) {
-      const af = getAF(from);
-      const t = String(userText || "").trim();
-
-      // se ele mandou algo que parece endereço, tenta cota
+      const af = getAF(from); const t = String(userText || "").trim();
+      if (!af.step && !looksLikeAddress(t) && looksLikeOrderIntent(userText)) { await sendText(from, "Pra entrega, me manda *CEP* ou *Rua + Número + Bairro* (ou sua localização 📍) pra eu calcular a taxa 😊"); return; }
+      const cep = extractCep(t); if (cep) { af.cep = cep; af.step = "ASK_NUMBER"; await sendText(from, "Perfeito ✅ Qual o *número* da casa?"); return; }
+      if (af.step === "ASK_NUMBER") { const n = extractHouseNumber(t); if (!n) { await sendText(from, "Me diz só o *número* da casa 😊"); return; } af.number = n; af.step = "ASK_BAIRRO"; await sendText(from, "Boa! Qual o *bairro*?"); return; }
+      if (af.step === "ASK_BAIRRO") { af.bairro = t.slice(0, 80); af.step = "ASK_COMPLEMENTO"; await sendText(from, "Tem *complemento*? Se não tiver, diga *sem*."); return; }
+      if (af.step === "ASK_COMPLEMENTO") {
+        af.complemento = looksLikeNoComplement(t) ? null : t.slice(0, 120); af.step = null;
+        const full = buildAddressText(af); const d2 = await safeQuote(full);
+        if (!d2?.ok) { af.pending = { formatted: full }; await askAddressConfirm(from, full, null); return; }
+        if (d2.within === false) { await sendText(from, `Ainda não entregamos aí (até ${MAX_KM} km). Quer *Retirada*?`); return; }
+        af.pending = { formatted: d2.formatted }; await askAddressConfirm(from, d2.formatted, d2); return;
+      }
       if (looksLikeAddress(t)) {
         const delivery = await safeQuote(t);
-
         if (delivery?.ok) {
-          if (delivery.within === false) {
-            await sendText(from, `Ainda não entregamos aí (até ${MAX_KM} km). Quer *Retirada*?`);
-            return;
-          }
-          const formatted = delivery.formatted || t;
-          af.pending = { formatted };
-          await askAddressConfirm(from, formatted, delivery);
-          return;
+          if (delivery.within === false) { await sendText(from, `Ainda não entregamos aí (até ${MAX_KM} km). Quer *Retirada*?`); return; }
+          const formatted = delivery.formatted || t; const af2 = getAF(from); af2.pending = { formatted }; await askAddressConfirm(from, formatted, delivery); return;
         }
-
-        // se falhou, entra no guiado
         const num = extractHouseNumber(t);
-        if (!num) {
-          af.street = t.slice(0, 120);
-          af.step = "ASK_NUMBER";
-          await sendText(from, "Perfeito 🙌 Agora me diga o *número*.\nSe preferir, mande seu *CEP* ou *localização 📍*.");
-          return;
-        }
-
-        af.street = t.slice(0, 120);
-        af.number = num;
-        af.step = "ASK_BAIRRO";
-        await sendText(from, "Show! Qual é o *bairro*? 😊");
-        return;
+        if (!num) { af.street = t.slice(0, 120); af.step = "ASK_NUMBER"; await sendText(from, "Perfeito 🙌 Agora me diga o *número*.\nSe preferir, mande seu *CEP* ou *localização 📍*."); return; }
+        af.street = t.slice(0, 120); af.number = num; af.step = "ASK_BAIRRO"; await sendText(from, "Show! Qual é o *bairro*? 😊"); return;
       }
-
-      // fluxo guiado
-      const cep = extractCep(t);
-      if (cep) {
-        af.cep = cep;
-        af.step = "ASK_NUMBER";
-        await sendText(from, "Perfeito ✅ Qual o *número* da casa?");
-        return;
-      }
-
-      if (af.step === "ASK_NUMBER") {
-        const n = extractHouseNumber(t);
-        if (!n) { await sendText(from, "Me diz só o *número* da casa 😊"); return; }
-        af.number = n;
-        af.step = "ASK_BAIRRO";
-        await sendText(from, "Boa! Qual o *bairro*?");
-        return;
-      }
-
-      if (af.step === "ASK_BAIRRO") {
-        af.bairro = t.slice(0, 80);
-        af.step = "ASK_COMPLEMENTO";
-        await sendText(from, "Tem *complemento*? Se não tiver, diga *sem*.");
-        return;
-      }
-
-      if (af.step === "ASK_COMPLEMENTO") {
-        af.complemento = looksLikeNoComplement(t) ? null : t.slice(0, 120);
-        af.step = null;
-
-        const full = buildAddressText(af);
-        const d2 = await safeQuote(full);
-
-        // ✅ se maps falhar, NÃO trava: confirma e segue
-        if (!d2?.ok) {
-          af.pending = { formatted: full };
-          await askAddressConfirm(from, full, null);
-          return;
-        }
-
-        if (d2.within === false) {
-          await sendText(from, `Ainda não entregamos aí (até ${MAX_KM} km). Quer *Retirada*?`);
-          return;
-        }
-
-        af.pending = { formatted: d2.formatted };
-        await askAddressConfirm(from, d2.formatted, d2);
-        return;
-      }
-
-      // se é entrega e ainda não tem endereço: pede
-      await sendText(from, "Pra entrega, me manda *CEP* ou *Rua + Número + Bairro* (ou sua localização 📍) pra eu calcular a taxa 😊");
-      return;
     }
 
     if (customer.lastAddress) {
-      const finalCota = await safeQuote(customer.lastAddress);
-      const kmTxt = Number.isFinite(finalCota?.km) ? finalCota.km.toFixed(1) : "?";
-      const feeTxt = finalCota?.fee != null ? Number(finalCota.fee).toFixed(2) : "?";
-      deliveryInternal = `ENTREGA (interno): ${kmTxt} km | Taxa: R$ ${feeTxt}`;
+       const finalCota = await safeQuote(customer.lastAddress);
+       const kmTxt = Number.isFinite(finalCota?.km) ? finalCota.km.toFixed(1) : "?";
+       currentFee = finalCota?.fee != null ? Number(finalCota.fee) : 0;
+       deliveryInternal = `ENTREGA (interno): ${kmTxt} km | Taxa: R$ ${currentFee.toFixed(2)}`;
     }
 
-    // ===================================================
-    // 5) PAGAMENTO (só pede quando não faltar endereço na entrega)
-    // ===================================================
     if (!customer.preferredPayment) {
-      await askPaymentButtons(from);
-      return;
+      if (customer.lastFulfillment === "entrega" && !customer.lastAddress) { } else { await askPaymentButtons(from); return; }
     }
 
-    // ===================================================
-    // 6) Carrega MENU + responde “TEM X?” de forma REAL
-    // ===================================================
-    const [menu, merchant, configPix] = await Promise.all([
-      getMenu(),
-      getMerchant(),
-      prisma.config.findUnique({ where: { key: "CHAVE_PIX" } }).catch(() => null),
-    ]);
+    if (!customer.name) { await sendText(from, "Antes de continuar 😊 qual seu *nome*?"); return; }
 
-    const qHas = extractHasQuestion(userText);
-    if (qHas) {
-      const hits = menuFindItems(menu, qHas);
-      if (hits.length) {
-        await sendText(from, `Tem sim 😊\n${hits.map((h) => `• ${h}`).join("\n")}\nQuer em qual tamanho?`);
-      } else {
-        await sendText(from, `No momento não achei *${qHas}* no cardápio 😕\nQuer ver todos os sabores? ${LINK_CARDAPIO}`);
-      }
-      return;
-    }
-
-    // ===================================================
-    // 7) IA (Cérebro) com fallback de quota
-    // ===================================================
-    const enderecoLoja = normalizeAddress(merchant);
-    const pagamentosLoja = normalizePayments(merchant);
+    // ==========================================
+    // Cérebro (IA) COM INTEGRAÇÃO DE PEDIDO JSON
+    // ==========================================
+    const [menu, pagamentosLoja] = await Promise.all([ getMenu(), getMerchant() ]);
+    const enderecoLoja = normalizeAddress(merchantCache.obj);
+    
+    // Obter CHAVE PIX do sistema
+    const configPix = await prisma.config.findUnique({ where: { key: "CHAVE_PIX" } }).catch(() => null);
     const pixKey = configPix?.value || "19 9 8319 3999";
-
+    
     const mode = getMode({ customer, now: new Date() });
     const RULES = loadRulesFromFiles(mode);
     const historyText = getHistoryText(from);
@@ -964,96 +584,242 @@ router.post("/webhook", async (req, res) => {
     const pedidoTxt = getDraft(from)?.text || "";
 
     const PROMPT = `
-Você atende como humano da Pappi Pizza (Campinas-SP). Não diga que é robô/IA. Fale natural, simpático e objetivo.
+Você atende como humano da Pappi Pizza (Campinas-SP). Não diga que é robô. Fale natural e simpático.
 
-REGRAS CRÍTICAS:
-- NUNCA diga: "VIP", "modo", "evento", "interno", "Google", "Maps".
-- Já sabemos:
-  - Nome: ${customer.name || "desconhecido"}
-  - Entrega/Retirada: ${customer.lastFulfillment}
-  - Pagamento: ${customer.preferredPayment}
-  - Pedido (rascunho): ${pedidoTxt || "a definir"}
+REGRAS:
+- Já sabemos: Nome: ${customer.name} | Envio: ${customer.lastFulfillment} | Pagamento: ${customer.preferredPayment}
+- Taxa de entrega confirmada: R$ ${currentFee.toFixed(2)}
 
 ROTEIRO OBRIGATÓRIO (1 pergunta por vez):
-1) PEDIDO: Pergunte o tamanho (pequena, média, grande, família) e sabores. Ofereça meia a meia.
-2) EXTRAS: Ofereça borda recheada e bebida.
-3) OBS: Alguma observação?
-4) TROCO: só se for dinheiro.
-5) CONFIRMAÇÃO: Resumo + total + prazo.
+1. Confirmar: tamanho, sabores. (Alerte se ele pedir um sabor que não tem no cardápio abaixo).
+2. Oferecer: borda recheada e bebida.
+3. OBS: Alguma observação especial?
+4. TROCO: Se pagamento for dinheiro, perguntar troco.
+5. CONFIRMAÇÃO: Resumo completo e valor TOTAL EXATO (Soma dos preços unitários + opções + entrega de R$ ${currentFee.toFixed(2)}).
 
-PIX:
-- Quando o cliente CONFIRMAR e for PIX, adicione NO FINAL: [GERAR_PIX:valor] (ex: [GERAR_PIX:57.90])
+FINALIZAÇÃO DE PEDIDO (ATENÇÃO MÁXIMA):
+Quando o cliente disser SIM/CONFIRMAR para o resumo final, você DEVE gerar um bloco JSON EXATO no final da sua resposta, dentro da tag \`\`\`json.
+Este JSON será enviado para a nossa API (CardapioWeb).
 
-REGRAS (interno):
-${RULES}
+Formato do JSON OBRIGATÓRIO:
+\`\`\`json
+{
+  "order_confirmation": true,
+  "order_type": "${customer.lastFulfillment === 'entrega' ? 'delivery' : 'takeout'}",
+  "observation": "Observações do cliente (ex: sem cebola, tocar campainha)",
+  "total_order_amount": VALOR_NUMERICO_FLUTUANTE_TOTAL_COM_TAXA,
+  "delivery_fee": ${customer.lastFulfillment === 'entrega' ? currentFee : 0},
+  "payment_method_id": ID_INTEIRO_DO_PAGAMENTO_ESCOLHIDO,
+  "change_for": VALOR_TROCO_NUMERICO_OU_NULL,
+  "items": [
+    {
+      "item_id": "ID_DO_PRODUTO_COMO_ESTA_NO_CARDAPIO",
+      "name": "NOME DO PRODUTO EXACTO",
+      "quantity": 1,
+      "unit_price": PRECO_UNITARIO_FLUTUANTE,
+      "observation": "obs do item",
+      "options": [
+         {
+           "option_id": "ID_DA_OPCAO_COMO_ESTA_NO_CARDAPIO",
+           "name": "NOME DA BORDA OU ADICIONAL",
+           "quantity": 1,
+           "unit_price": PRECO_DA_OPCAO_FLUTUANTE
+         }
+      ]
+    }
+  ]
+}
+\`\`\`
+
+Regras do JSON[cite: 58, 60, 61, 82, 88, 89, 111, 112, 113, 114]:
+- O "total_order_amount" DEVE SER EXATAMENTE a soma de todos os itens (unit_price + options) + delivery_fee[cite: 82, 113, 114].
+- "payment_method_id": Veja a lista de pagamentos e use o ID numérico correspondente a '${customer.preferredPayment}'[cite: 105, 107].
+- NUNCA invente "item_id" ou "option_id". Copie EXATAMENTE o que diz no CARDÁPIO abaixo (ex: se diz ID:123, coloque "123")[cite: 91, 98].
+
+PAGAMENTOS DISPONÍVEIS:
+${pagamentosLoja}
 
 DADOS:
-- Endereço loja: ${enderecoLoja}
-- Pagamentos: ${pagamentosLoja}
-- PIX: ${pixKey}
-- Cardápio: ${LINK_CARDAPIO}
+Endereço: ${enderecoLoja}
 ${deliveryInternal}
 
-CARDÁPIO COMPLETO:
+CARDÁPIO COMPLETO (Use os IDs e Preços reais):
 ${menu}
 
 HISTÓRICO:
 ${historyText}
-
-UPSELL (no máximo 1):
-${upsell || "NENHUM"}
-
-Sempre termine com 1 pergunta curta.
 `.trim();
 
     const content = `${PROMPT}\n\nCliente: ${userText}\nAtendente:`;
-
     let resposta = "";
+    
     try {
       resposta = await geminiGenerate(content);
     } catch (e) {
-      console.error("❌ Gemini falhou / breaker:", e?.message || e);
-      await sendText(from, `Tô com muitas mensagens agora 😅\nMe diga: *tamanho* e *sabores* da pizza (ou veja o menu: ${LINK_CARDAPIO})`);
+      console.error("❌ Gemini falhou definitivamente:", e?.message || e);
+      await sendText(from, "Estou com muitas mensagens agora 😅 Me diga apenas o *tamanho* e os *sabores* da pizza que quer pedir, por favor. (Ou veja o nosso menu rápido: " + LINK_CARDAPIO + ")");
       return;
     }
 
-    // ===================================================
-    // 8) PIX INTERCEPT
-    // ===================================================
-    const pixMatch = resposta.match(/\[GERAR_PIX:(\d+\.\d{2})\]/);
-    if (pixMatch) {
-      const valorTotal = parseFloat(pixMatch[1]);
-      resposta = resposta.replace(pixMatch[0], "").trim();
-      if (resposta) await sendText(from, resposta);
-
-      const txid = `PAPPI${Date.now()}`;
-      const pixData = await createPixCharge(txid, valorTotal, customer.name || "Cliente Pappi");
-
-      if (pixData?.pixCopiaECola) {
-        await prisma.order.create({
-          data: {
-            displayId: txid,
-            status: "waiting_payment",
-            total: valorTotal,
-            items: pedidoTxt ? `Pedido: ${pedidoTxt}` : "Pedido via WhatsApp",
-            customerId: customer.id,
-          },
-        });
-
-        const qrCodeUrl = `https://quickchart.io/qr?size=300&text=${encodeURIComponent(pixData.pixCopiaECola)}`;
-        await sendImage(from, qrCodeUrl, "QR Code PIX ✅");
-        await sendText(from, `Copia e Cola:\n${pixData.pixCopiaECola}`);
-        clearDraft(from);
-      } else {
-        await sendText(from, `Não consegui gerar o QR agora 😅\nChave PIX: ${pixKey}`);
-      }
-
-      pushHistory(from, "assistant", resposta || "[PIX GERADO]");
-      return;
+    // ==========================================
+    // EXTRAÇÃO DO JSON E INTEGRAÇÃO CARDÁPIO WEB
+    // ==========================================
+    let jsonMatch = resposta.match(/```json([\s\S]*?)```/);
+    let orderDataFromIA = null;
+    
+    if (jsonMatch && jsonMatch[1]) {
+        try {
+            orderDataFromIA = JSON.parse(jsonMatch[1].trim());
+            resposta = resposta.replace(jsonMatch[0], "").trim(); // Remove o JSON da resposta que vai para o WhatsApp
+        } catch (e) {
+            console.error("Erro ao fazer parse do JSON da IA:", e);
+        }
     }
 
+    let finalOrderPayload = null;
+    let txid = `PAPPI${Date.now()}`;
+
+    // Se a IA gerou o JSON de confirmação, vamos montar o objeto final para a API da CardapioWeb 
+    if (orderDataFromIA && orderDataFromIA.order_confirmation === true) {
+        
+        // Formatar itens para garantir os cálculos exatos [cite: 88, 89, 122, 123, 124]
+        let itemsFormatados = [];
+        let sumItems = 0;
+
+        if (Array.isArray(orderDataFromIA.items)) {
+            itemsFormatados = orderDataFromIA.items.map(item => {
+                let optionsSum = 0;
+                let optionsFormatted = [];
+                
+                if (item.options && Array.isArray(item.options)) {
+                    optionsFormatted = item.options.map(opt => {
+                        const optPrice = parseFloat(opt.unit_price) || 0;
+                        const optQty = parseInt(opt.quantity) || 1;
+                        optionsSum += (optPrice * optQty);
+                        return {
+                            name: opt.name,
+                            quantity: optQty,
+                            unit_price: optPrice,
+                            option_id: opt.option_id ? String(opt.option_id) : undefined
+                        };
+                    });
+                }
+
+                const basePrice = parseFloat(item.unit_price) || 0;
+                const qty = parseInt(item.quantity) || 1;
+                const totalPriceItem = (basePrice + optionsSum) * qty; // Fórmula exata da documentação [cite: 124]
+                sumItems += totalPriceItem;
+
+                return {
+                    name: item.name,
+                    quantity: qty,
+                    unit_price: basePrice,
+                    total_price: totalPriceItem,
+                    item_id: item.item_id ? String(item.item_id) : undefined,
+                    observation: item.observation || "",
+                    options: optionsFormatted.length > 0 ? optionsFormatted : undefined
+                };
+            });
+        }
+
+        const deliveryFee = customer.lastFulfillment === 'entrega' ? currentFee : 0;
+        const totalCalculado = sumItems + deliveryFee; // Fórmula total [cite: 114]
+
+        finalOrderPayload = {
+            order_id: txid,
+            display_id: txid.replace('PAPPI', ''),
+            order_type: orderDataFromIA.order_type || (customer.lastFulfillment === 'entrega' ? 'delivery' : 'takeout'),
+            observation: orderDataFromIA.observation || "Pedido via Assistente Virtual WhatsApp",
+            customer: {
+                phone: from,
+                name: customer.name || "Cliente WhatsApp"
+            },
+            totals: {
+                order_amount: totalCalculado,
+                delivery_fee: deliveryFee,
+                additional_fee: 0.0,
+                discounts: 0.0
+            },
+            items: itemsFormatados,
+            payments: [
+                {
+                    total: totalCalculado,
+                    payment_method_id: parseInt(orderDataFromIA.payment_method_id) || 101, // Padrão 101 (dinheiro) se falhar [cite: 105, 107]
+                    change_for: orderDataFromIA.change_for ? parseFloat(orderDataFromIA.change_for) : undefined
+                }
+            ]
+        };
+
+        // Adicionar morada se for entrega [cite: 84, 85, 86, 87]
+        if (customer.lastFulfillment === 'entrega') {
+            const af = getAF(from);
+            finalOrderPayload.delivery_address = buildDeliveryAddressObject(af, af?.pending?.lat, af?.pending?.lng);
+        }
+    }
+
+
+    // ==========================================
+    // VERIFICAÇÃO FINAL PIX OU DINHEIRO/CARTÃO
+    // ==========================================
+    if (finalOrderPayload) {
+        
+        // Se for PIX
+        if (customer.preferredPayment === "pix") {
+            const pixData = await createPixCharge(txid, finalOrderPayload.totals.order_amount, customer.name || "Cliente Pappi");
+            
+            if (pixData?.pixCopiaECola) {
+                // Guarda o JSON na base de dados para enviar para a CardapioWeb SÓ depois do PIX ser pago (no webhook do Inter)
+                await prisma.order.create({
+                  data: { 
+                      displayId: txid, 
+                      status: "waiting_payment", 
+                      total: finalOrderPayload.totals.order_amount, 
+                      items: "Aguardando pagamento PIX", 
+                      customerId: customer.id,
+                      cwJson: JSON.stringify(finalOrderPayload) // Este campo precisa existir na BD!
+                  },
+                });
+                
+                if (resposta) await sendText(from, resposta);
+                const qrCodeUrl = `https://quickchart.io/qr?size=300&text=${encodeURIComponent(pixData.pixCopiaECola)}`;
+                await sendImage(from, qrCodeUrl, "QR Code PIX ✅");
+                await sendText(from, `Copia e Cola:\n${pixData.pixCopiaECola}\n\nAssim que o pagamento cair, o pedido é impresso na cozinha! 👨‍🍳`);
+                clearDraft(from);
+                pushHistory(from, "assistant", "[PIX GERADO - AGUARDANDO PAGAMENTO PARA ENVIAR À COZINHA]");
+                return;
+
+            } else {
+                await sendText(from, `Tive um problema a gerar o QR Code 😅\nPode enviar para a Chave PIX: ${pixKey} e mandar o comprovante?`);
+            }
+        
+        } else {
+            // Se for Dinheiro ou Cartão na Entrega, já pode criar o pedido direto na CardapioWeb!
+            try {
+                await createOrder(finalOrderPayload);
+                
+                await prisma.order.create({
+                  data: { displayId: txid, status: "confirmed", total: finalOrderPayload.totals.order_amount, items: "Pedido Dinheiro/Cartao", customerId: customer.id },
+                });
+                
+                if (resposta) await sendText(from, resposta);
+                await sendText(from, "✅ *Tudo certo! O seu pedido já tocou na nossa cozinha e começou a ser preparado.* 👨‍🍳🍕");
+                clearDraft(from);
+                pushHistory(from, "assistant", "[PEDIDO CONFIRMADO E ENVIADO PARA A COZINHA]");
+                return;
+                
+            } catch (error) {
+                console.error("Falha ao enviar pedido para Cardapio Web:", error);
+                await sendText(from, "Tive um erro de sistema ao imprimir o seu pedido na cozinha 😕 Vou chamar um humano para confirmar consigo agora!");
+                await setHandoffOn(from);
+                return;
+            }
+        }
+    }
+
+    // Se a IA não gerou JSON (ainda está a conversar), envia a resposta normal
     pushHistory(from, "assistant", resposta);
     await sendText(from, resposta);
+
   } catch (error) {
     console.error("🔥 Erro Fatal Webhook:", error);
     await sendText(from, `Deu uma instabilidade 😅\nMe diz *tamanho* e *sabor* da pizza? (ou peça aqui: ${LINK_CARDAPIO})`);

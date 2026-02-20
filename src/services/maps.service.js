@@ -1,11 +1,6 @@
 // src/services/maps.service.js
 const ENV = require("../config/env");
 
-function toNum(x) {
-  const n = typeof x === "number" ? x : parseFloat(String(x || "").replace(",", "."));
-  return Number.isFinite(n) ? n : null;
-}
-
 function calcDeliveryFeeKm(km) {
   if (km <= 2) return 5;
   if (km <= 3) return 8;
@@ -14,14 +9,24 @@ function calcDeliveryFeeKm(km) {
   return null;
 }
 
-async function safeJson(resp) {
-  try { return await resp.json(); } catch { return null; }
+async function fetchJsonWithTimeout(url, ms = 8000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const resp = await fetch(url, { signal: ctrl.signal });
+    const data = await resp.json().catch(() => null);
+    return { ok: resp.ok, status: resp.status, data };
+  } finally {
+    clearTimeout(t);
+  }
 }
 
 async function quoteByAddress(address) {
   const key = ENV.GOOGLE_MAPS_API_KEY;
-  const storeLat = toNum(ENV.STORE_LAT);
-  const storeLng = toNum(ENV.STORE_LNG);
+
+  // ✅ parse robusto (Render env vem string)
+  const storeLat = Number.parseFloat(String(ENV.STORE_LAT || ""));
+  const storeLng = Number.parseFloat(String(ENV.STORE_LNG || ""));
 
   if (!key) throw new Error("missing_google_maps_key");
   if (!Number.isFinite(storeLat) || !Number.isFinite(storeLng)) throw new Error("missing_store_lat_lng");
@@ -32,10 +37,10 @@ async function quoteByAddress(address) {
   geoUrl.searchParams.set("key", key);
   geoUrl.searchParams.set("language", "pt-BR");
 
-  const geoRes = await fetch(geoUrl);
-  const geo = await safeJson(geoRes);
+  const geoRes = await fetchJsonWithTimeout(geoUrl, 8000);
+  const geo = geoRes.data;
 
-  if (!geo || geo.status !== "OK" || !geo.results?.[0]) throw new Error("geocode_failed");
+  if (geo?.status !== "OK" || !geo.results?.[0]) throw new Error("geocode_failed");
 
   const loc = geo.results[0].geometry.location;
   const formatted = geo.results[0].formatted_address;
@@ -48,14 +53,14 @@ async function quoteByAddress(address) {
   dmUrl.searchParams.set("key", key);
   dmUrl.searchParams.set("language", "pt-BR");
 
-  const dmRes = await fetch(dmUrl);
-  const dm = await safeJson(dmRes);
+  const dmRes = await fetchJsonWithTimeout(dmUrl, 8000);
+  const dm = dmRes.data;
 
   const el = dm?.rows?.[0]?.elements?.[0];
   if (!el || el.status !== "OK") throw new Error("distance_matrix_failed");
 
   const km = Math.round((el.distance.value / 1000) * 10) / 10;
-  const eta = Math.max(1, Math.round(el.duration.value / 60));
+  const eta = Math.round(el.duration.value / 60);
   const fee = calcDeliveryFeeKm(km);
 
   return {
@@ -76,10 +81,10 @@ async function reverseGeocode(lat, lng) {
   url.searchParams.set("key", key);
   url.searchParams.set("language", "pt-BR");
 
-  const resp = await fetch(url);
-  const data = await safeJson(resp);
+  const r = await fetchJsonWithTimeout(url, 8000);
+  const data = r.data;
 
-  if (!data || data.status !== "OK" || !data.results?.[0]) throw new Error("reverse_failed");
+  if (data?.status !== "OK" || !data.results?.[0]) throw new Error("reverse_failed");
   return data.results[0].formatted_address;
 }
 

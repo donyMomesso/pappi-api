@@ -1,3 +1,4 @@
+cwJson String?
 handoff          Boolean   @default(false)
 handoffAt        DateTime?
 

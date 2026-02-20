@@ -20,6 +20,12 @@ const prisma = new PrismaClient();
 const LINK_CARDAPIO = "https://pappipizza.cardapioweb.com";
 
 // ===================================================
+// Config de mensagens / SLA
+// ===================================================
+const ETA_DELIVERY = "40 a 60 min";
+const ETA_TAKEOUT = "30 a 40 min";
+
+// ===================================================
 // Anti-duplicação (WhatsApp pode reenviar)
 // ===================================================
 const processedMsgIds = new Set();
@@ -147,7 +153,7 @@ function looksLikeOrderIntent(text) {
   const t = String(text || "").toLowerCase().trim();
   if (!t) return false;
   if (/(quero|pedir|fecha|fechar|vou querer|manda|me vê)/i.test(t)) return true;
-  if (/(pizza|calabresa|mussarela|frango|portuguesa|4 queijos|quatro queijos|meia|metade|borda|grande|m[eé]dia|pequena|gigante|16|12|8)/i.test(t)) return true;
+  if (/(pizza|calabresa|mussarela|frango|portuguesa|4 queijos|quatro queijos|meia|metade|borda|grande|m[eé]dia|pequena|gigante|16)/i.test(t)) return true;
   if (/(quanto|valor|preço|preco|taxa)/i.test(t) && t.length < 30) return false;
   return false;
 }
@@ -282,6 +288,25 @@ async function askPaymentButtons(to) {
 }
 
 // ===================================================
+// Rapport / início de conversa (1x por telefone)
+// ===================================================
+const greeted = new Set();
+function isGreetingText(t) {
+  const s = String(t || "").trim().toLowerCase();
+  return /^(oi|olá|ola|bom dia|boa tarde|boa noite|menu|card[aá]pio|cardapio)$/i.test(s);
+}
+async function sendRapport(to, customerName) {
+  const nome = customerName ? `, ${customerName}` : "";
+  const msg =
+    `Olá${nome}! 👋 Bem-vindo(a) à *Pappi Pizza* 🍕\n` +
+    `Pra facilitar, você pode pedir pelo nosso cardápio online:\n${LINK_CARDAPIO}\n\n` +
+    `⏱️ *Tempo estimado*: entrega ${ETA_DELIVERY} | retirada ${ETA_TAKEOUT}\n` +
+    `Me diga: é *Entrega* ou *Retirada*?`;
+  await sendText(to, msg);
+  await askFulfillmentButtons(to);
+}
+
+// ===================================================
 // Address Flow (GUIADO + CEP + GPS)
 // ===================================================
 const addressFlow = new Map();
@@ -409,20 +434,52 @@ async function geminiGenerate(content) {
 let menuCache = { data: null, raw: null, timestamp: 0 };
 const CACHE_TTL = 5 * 60 * 1000;
 
+function cwApiKey() { return ENV.CARDAPIOWEB_API_KEY || ENV.CARDAPIOWEB_TOKEN || ""; }
+function cwPartnerKey() { return ENV.CARDAPIOWEB_PARTNER_KEY || ""; }
+
+// Extrai uma lista amigável de bebidas (pra IA só oferecer o que existe)
+function extractBeveragesForPrompt(raw) {
+  try {
+    const cats = raw?.categories || [];
+    const isBeverageCat = (name) => /bebida|bebidas|refrigerante|refrigerantes|refri|drink|drinks|suco|sucos|água|agua/i.test(String(name || ""));
+    const out = [];
+    for (const c of cats) {
+      if (c?.status !== "ACTIVE") continue;
+      if (!isBeverageCat(c?.name)) continue;
+      for (const it of (c.items || [])) {
+        if (it?.status !== "ACTIVE") continue;
+        out.push(String(it.name || "").trim());
+      }
+    }
+    const uniq = Array.from(new Set(out.filter(Boolean)));
+    return uniq.slice(0, 40);
+  } catch {
+    return [];
+  }
+}
+
 async function getMenu() {
   if (menuCache.data && Date.now() - menuCache.timestamp < CACHE_TTL) return menuCache.data;
+
+  const apiKey = cwApiKey();
+  const partnerKey = cwPartnerKey();
+
+  if (!apiKey || !partnerKey) {
+    menuCache = { data: "Cardápio indisponível.", raw: null, timestamp: Date.now() };
+    return menuCache.data;
+  }
 
   const base = ENV.CARDAPIOWEB_BASE_URL || "https://integracao.cardapioweb.com";
   try {
     const resp = await fetch(`${base}/api/partner/v1/catalog`, {
       headers: {
-        "X-API-KEY": ENV.CARDAPIOWEB_API_KEY || ENV.CARDAPIOWEB_TOKEN,
-        "X-PARTNER-KEY": ENV.CARDAPIOWEB_PARTNER_KEY,
+        "X-API-KEY": apiKey,
+        "X-PARTNER-KEY": partnerKey,
         Accept: "application/json"
       }
     });
 
-    const data = await resp.json();
+    const data = await resp.json().catch(() => null);
     if (!data?.categories) return "Cardápio indisponível.";
 
     let txt = "🍕 MENU PAPPI:\n";
@@ -453,63 +510,6 @@ async function getMenu() {
 }
 
 // ===================================================
-// LISTAS "BONITAS" DO CATÁLOGO (sem IDs) p/ evitar erro de item
-// ===================================================
-function normalizeTxt(s) {
-  return String(s || "")
-    .toLowerCase()
-    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function catalogItemsFlat(raw) {
-  const out = [];
-  const cats = raw?.categories || [];
-  for (const cat of cats) {
-    if (cat?.status !== "ACTIVE") continue;
-    for (const it of (cat.items || [])) {
-      if (it?.status !== "ACTIVE") continue;
-      out.push({
-        category: String(cat.name || ""),
-        id: it.id,
-        name: String(it.name || ""),
-        price: Number(it.price) || 0,
-        raw: it,
-      });
-    }
-  }
-  return out;
-}
-
-function buildPrettyListFromCatalog(raw, { includeCategoriesRegex, limit = 10 } = {}) {
-  if (!raw?.categories) return "";
-  const rx = includeCategoriesRegex ? new RegExp(includeCategoriesRegex, "i") : null;
-  const items = catalogItemsFlat(raw).filter(x => rx ? rx.test(x.category) : true);
-
-  // ordena por nome para ficar estável
-  items.sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
-
-  const picked = items.slice(0, Math.max(1, limit));
-  return picked.map(x => `- ${x.name}${Number.isFinite(x.price) && x.price > 0 ? ` — R$ ${x.price.toFixed(2)}` : ""}`).join("\n");
-}
-
-function buildSodasHint(raw) {
-  // tenta achar categorias de bebidas/refrigerantes
-  const list =
-    buildPrettyListFromCatalog(raw, { includeCategoriesRegex: "bebida|refrigerante|refri|lata|2l|litro", limit: 12 }) ||
-    "";
-  return list ? `OPÇÕES DE BEBIDAS (escolha 1):\n${list}` : "";
-}
-
-function buildPizzaHint(raw) {
-  const list =
-    buildPrettyListFromCatalog(raw, { includeCategoriesRegex: "pizza|pizzas", limit: 12 }) ||
-    "";
-  return list ? `PIZZAS DO CARDÁPIO (escolha pelo nome certinho):\n${list}` : "";
-}
-
-// ===================================================
 // Pagamentos (CORRETO) - merchant/payment_methods
 // ===================================================
 let paymentCache = { list: null, timestamp: 0 };
@@ -522,15 +522,13 @@ async function ensurePaymentMethods() {
 }
 
 function paymentsText(list) {
-  // NUNCA expor ID pro cliente. Aqui é só pro prompt interno da IA, mas mesmo assim deixamos claro:
   if (!Array.isArray(list) || list.length === 0) return "PIX, Cartão, Dinheiro";
-  return list.map(p => `${p.name} (${p.kind})`).join(" | ");
+  return list.map(p => `ID:${p.id} - ${p.name} (${p.kind})`).join(" | ");
 }
 
 function pickPaymentId(list, preferredPayment) {
   if (!Array.isArray(list) || list.length === 0) return null;
 
-  // kinds típicos: pix, money, credit_card, debit_card (varia, mas costuma ser isso)
   if (preferredPayment === "pix") {
     return (list.find(p => String(p.kind).toLowerCase() === "pix") || list[0])?.id ?? null;
   }
@@ -548,27 +546,61 @@ function pickPaymentId(list, preferredPayment) {
 }
 
 // ===================================================
+// Totais (seguro p/ evitar 422 por centavos)
+// ===================================================
+function round2(n) { return Math.round((Number(n) + Number.EPSILON) * 100) / 100; }
+
+function calcItemTotal(item) {
+  const base = round2(item.unit_price || 0);
+  const qty = Number(item.quantity || 1);
+  const optsSum = (item.options || []).reduce((acc, o) => {
+    const q = Number(o.quantity || 1);
+    const up = round2(o.unit_price || 0);
+    return acc + round2(q * up);
+  }, 0);
+  return round2((base + optsSum) * qty);
+}
+
+function calcOrderAmount(payload) {
+  const itemsSum = round2((payload.items || []).reduce((acc, it) => acc + round2(it.total_price || calcItemTotal(it)), 0));
+  const delivery = round2(payload.totals?.delivery_fee || 0);
+  const add = round2(payload.totals?.additional_fee || 0);
+  const disc = round2(payload.totals?.discounts || 0);
+  return round2(itemsSum + delivery + add - disc);
+}
+
+// ===================================================
 // Helper - Construtor de Endereço Cardápio Web (seguro)
 // ===================================================
 function buildDeliveryAddressObjectFromCustomer(customer, fallbackFormatted) {
-  // Melhor: você salvar campos estruturados no banco.
-  // Como hoje você salva apenas lastAddress, vamos preencher o mínimo e evitar CEP "00000000" quando possível.
   const cep = extractCep(customer?.lastAddress || "") || extractCep(fallbackFormatted || "") || null;
+
+  const lat = Number(customer?.lastLat);
+  const lng = Number(customer?.lastLng);
 
   return {
     state: "SP",
     city: "Campinas",
-    neighborhood: customer?.lastNeighborhood || customer?.lastBairro || "Centro",
+    neighborhood: customer?.lastNeighborhood || customer?.lastBairro || customer?.lastNeighborhood || "Centro",
     street: customer?.lastStreet || "Rua não informada",
     number: customer?.lastNumber || "S/N",
     complement: customer?.lastComplement || "",
     reference: "",
     postal_code: cep || "00000000",
     coordinates: {
-      latitude: Number(customer?.lastLat) || 0,
-      longitude: Number(customer?.lastLng) || 0
+      latitude: Number.isFinite(lat) ? lat : 0,
+      longitude: Number.isFinite(lng) ? lng : 0
     }
   };
+}
+
+function hasValidDeliveryAddressForCW(customer) {
+  const cep = extractCep(customer?.lastAddress || "");
+  const lat = Number(customer?.lastLat);
+  const lng = Number(customer?.lastLng);
+  const hasCep = !!cep && cep.length === 8;
+  const hasCoords = Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) > 0.0001 && Math.abs(lng) > 0.0001;
+  return { ok: hasCep && hasCoords, hasCep, hasCoords };
 }
 
 // ===================================================
@@ -592,19 +624,57 @@ router.post("/webhook/inter", async (req, res) => {
       const order = await prisma.order.findFirst({ where: { displayId: pag.txid } });
       if (!order) continue;
 
-      await prisma.order.update({ where: { id: order.id }, data: { status: "confirmed" } });
+      await prisma.order.update({ where: { id: order.id }, data: { status: "paid" } }).catch(() => null);
       const customer = await prisma.customer.findUnique({ where: { id: order.customerId } });
 
       if (customer?.phone) {
-        await sendText(customer.phone, `✅ *Pagamento confirmado!* Recebemos R$ ${pag.valor}.\nSeu pedido foi enviado para o sistema e vai seguir para preparo. 🍕👨‍🍳`);
+        await sendText(
+          customer.phone,
+          `✅ *Pagamento confirmado!* Recebemos R$ ${pag.valor}.\nAgora vamos enviar seu pedido pro sistema da loja e iniciar o preparo. 🍕`
+        );
 
         if (order.cwJson) {
           try {
             const parsedData = JSON.parse(order.cwJson);
+
+            // Recalcular totais antes de enviar (segurança)
+            if (Array.isArray(parsedData?.items)) {
+              parsedData.items = parsedData.items.map((it) => {
+                const fixed = { ...it };
+                fixed.total_price = calcItemTotal(fixed);
+                return fixed;
+              });
+            }
+            parsedData.totals = parsedData.totals || {};
+            parsedData.totals.order_amount = calcOrderAmount(parsedData);
+            if (Array.isArray(parsedData?.payments) && parsedData.payments[0]) {
+              parsedData.payments[0].total = parsedData.totals.order_amount;
+            }
+
             const cwResp = await createOrder(parsedData);
-            console.log("✅ Pedido injetado no Cardapio Web após PIX com sucesso!", cwResp?.id, cwResp?.status);
+
+            await prisma.order.update({
+              where: { id: order.id },
+              data: {
+                status: String(cwResp?.status || "waiting_confirmation"),
+                cwId: cwResp?.id ? String(cwResp.id) : null,
+                cwStatus: String(cwResp?.status || "waiting_confirmation"),
+              }
+            }).catch(() => null);
+
+            console.log("✅ Pedido injetado no Cardapio Web após PIX com sucesso!");
+
+            await sendText(
+              customer.phone,
+              `✅ Pedido registrado no sistema da loja.\nStatus: *Aguardando confirmação / preparo*.\n⏱️ Tempo estimado: ${ETA_DELIVERY} (entrega) | ${ETA_TAKEOUT} (retirada)\nVocê vai recebendo as atualizações por aqui.`
+            );
           } catch (e) {
             console.error("❌ Falha ao injetar pedido PIX no Cardapio Web:", e?.data || e);
+            await sendText(
+              customer.phone,
+              "Tivemos uma instabilidade ao enviar pro sistema da loja 😕 Já acionei um atendente pra confirmar com você."
+            );
+            await setHandoffOn(customer.phone);
           }
         }
       }
@@ -639,7 +709,7 @@ router.post("/webhook", async (req, res) => {
       if (btnId === "HELP_HUMAN") {
         pushHistory(from, "user", "BOTÃO: atendente");
         await setHandoffOn(from);
-        await sendText(from, "Perfeito ✅ Já chamei um atendente pra continuar aqui com você. Só um instantinho 😊");
+        await sendText(from, "Perfeito ✅ Já chamei um atendente pra continuar aqui com você.");
         return;
       }
 
@@ -657,6 +727,15 @@ router.post("/webhook", async (req, res) => {
           data: { lastFulfillment: v, lastInteraction: new Date() }
         }).catch(() => customer);
         pushHistory(from, "user", `BOTÃO: ${v}`);
+
+        if (v === "retirada") {
+          await sendText(from, `Perfeito ✅ Retirada! ⏱️ Tempo estimado: *${ETA_TAKEOUT}*.\nAgora me diga seu pedido 🍕 (tamanho + sabor, ou meia a meia)`);
+          return;
+        }
+
+        // entrega
+        await sendText(from, `Perfeito ✅ Entrega! ⏱️ Tempo estimado: *${ETA_DELIVERY}*.\nAgora me manda *CEP* ou *Rua + Número + Bairro* (ou sua localização 📍) pra eu calcular a taxa 😊`);
+        return;
       }
 
       if (btnId === "PAY_PIX" || btnId === "PAY_CARTAO" || btnId === "PAY_DINHEIRO") {
@@ -671,12 +750,19 @@ router.post("/webhook", async (req, res) => {
       if (btnId === "ADDR_CONFIRM") {
         const af = getAF(from);
         const formatted = af?.pending?.formatted || null;
+        const lat = af?.pending?.lat;
+        const lng = af?.pending?.lng;
 
         if (formatted) {
-          // salva endereço “final”
+          // salva endereço “final” + tenta salvar coords se tiver
           await prisma.customer.update({
             where: { phone: from },
-            data: { lastAddress: String(formatted).slice(0, 200), lastInteraction: new Date() }
+            data: {
+              lastAddress: String(formatted).slice(0, 200),
+              lastLat: (lat != null ? Number(lat) : customer.lastLat) || null,
+              lastLng: (lng != null ? Number(lng) : customer.lastLng) || null,
+              lastInteraction: new Date()
+            }
           }).catch(() => null);
 
           pushHistory(from, "user", `ENDEREÇO CONFIRMADO: ${formatted}`);
@@ -753,6 +839,14 @@ router.post("/webhook", async (req, res) => {
     const userText = msg.text?.body || "";
     if (!userText) return;
 
+    // rapport 1x (se for saudação)
+    if (!greeted.has(from) && isGreetingText(userText)) {
+      greeted.add(from);
+      pushHistory(from, "user", userText);
+      await sendRapport(from, customer?.name || null);
+      return;
+    }
+
     if (detectHumanRequest(userText) || detectIrritation(userText) || detectLoop(from)) {
       pushHistory(from, "user", userText);
       await sendText(from, "Entendi 🙏 desculpa a confusão. Vamos resolver agora.");
@@ -772,7 +866,7 @@ router.post("/webhook", async (req, res) => {
     customer = await prisma.customer.update({ where: { phone: from }, data: dataToUpdate }).catch(() => customer);
     pushHistory(from, "user", userText);
 
-    if (shouldAskName(from, customer) && /^(oi|olá|ola|sim|boa|boa noite|bom dia|boa tarde|menu)$/i.test(userText.trim())) {
+    if (shouldAskName(from, customer) && isGreetingText(userText)) {
       await sendText(from, "Pra eu te atender certinho 😊 me diz seu *nome*? (ex: Dony)");
       return;
     }
@@ -782,7 +876,15 @@ router.post("/webhook", async (req, res) => {
       return;
     }
 
-    if (!customer.lastFulfillment) { await askFulfillmentButtons(from); return; }
+    if (!customer.lastFulfillment) {
+      // sempre reforça cardápio e SLA
+      if (!greeted.has(from)) {
+        greeted.add(from);
+        await sendText(from, `Pra pedir rapidinho, pode usar o cardápio:\n${LINK_CARDAPIO}\n⏱️ Entrega ${ETA_DELIVERY} | Retirada ${ETA_TAKEOUT}`);
+      }
+      await askFulfillmentButtons(from);
+      return;
+    }
 
     if (!looksLikeAddress(userText) && looksLikeOrderIntent(userText)) setDraft(from, userText);
 
@@ -796,7 +898,7 @@ router.post("/webhook", async (req, res) => {
       const t = String(userText || "").trim();
 
       if (!af.step && !looksLikeAddress(t) && looksLikeOrderIntent(userText)) {
-        await sendText(from, "Pra entrega, me manda *CEP* ou *Rua + Número + Bairro* (ou sua localização 📍) pra eu calcular a taxa 😊");
+        await sendText(from, `Pra entrega, me manda *CEP* ou *Rua + Número + Bairro* (ou sua localização 📍) pra eu calcular a taxa 😊\n(Cardápio: ${LINK_CARDAPIO})`);
         return;
       }
 
@@ -867,7 +969,6 @@ router.post("/webhook", async (req, res) => {
     }
 
     if (!customer.preferredPayment) {
-      // se entrega sem endereço ainda, deixa fluir.
       if (!(customer.lastFulfillment === "entrega" && !customer.lastAddress)) {
         await askPaymentButtons(from);
         return;
@@ -881,9 +982,7 @@ router.post("/webhook", async (req, res) => {
     // ===================================================
     const [menu, payList] = await Promise.all([getMenu(), ensurePaymentMethods()]);
     const pagamentosLoja = paymentsText(payList);
-
-    const sodasHint = buildSodasHint(menuCache.raw);
-    const pizzasHint = buildPizzaHint(menuCache.raw);
+    const beveragesList = extractBeveragesForPrompt(menuCache.raw);
 
     // Obter CHAVE PIX do sistema
     const configPix = await prisma.config.findUnique({ where: { key: "CHAVE_PIX" } }).catch(() => null);
@@ -905,11 +1004,6 @@ router.post("/webhook", async (req, res) => {
         ? `ENTREGA (interno): Taxa atual R$ ${Number(currentFee).toFixed(2)}`
         : `RETIRADA (interno): sem taxa`;
 
-    const etaTxt =
-      customer.lastFulfillment === "entrega"
-        ? "Tempo estimado: 40 a 60 minutos."
-        : "Tempo estimado: 30 a 40 minutos.";
-
     // ===================================================
     // PROMPT
     // ===================================================
@@ -918,25 +1012,28 @@ Você atende como humano da Pappi Pizza (Campinas-SP). Não diga que é robô. F
 ${tone}
 
 REGRAS DE ATENDIMENTO (MUITO IMPORTANTE):
-- Já sabemos: Nome: ${customer.name || "(não informado)"} | Envio: ${customer.lastFulfillment || "(não definido)"} | Pagamento: ${customer.preferredPayment || "(não definido)"}
-- Taxa de entrega (se entrega): R$ ${Number(currentFee).toFixed(2)}
-- PROIBIDO FALAR IDs: NUNCA diga os códigos dos produtos (ex: "ID:123") para o cliente na conversa. IDs são só para preencher o JSON final.
-- NUNCA INVENTAR ITEM: Se não tiver certeza absoluta que o item existe no CARDÁPIO, você deve pedir para o cliente escolher pelo nome exato do cardápio (usar lista abaixo) ou mandar o link do cardápio.
-- SABORES GENÉRICOS: Se o cliente pedir "frango com catupiry" e não existir exatamente assim no cardápio, mostre as opções reais do cardápio e peça para escolher UMA delas pelo nome exato.
-- BEBIDAS: Se o cliente pedir "coca", mostre a lista de bebidas disponíveis e peça para ele escolher qual (ex: 2L, lata, etc).
-- MEIO A MEIO: Pode. Você calcula o total do pedido corretamente no JSON final. **NUNCA explique ao cliente que é "o sabor mais caro"**. Apenas informe o valor final.
-- STATUS DO PEDIDO: Você NÃO pode dizer "motoboy a caminho" nem "pedido confirmado" sem retorno do sistema. Após o cliente confirmar o resumo, diga apenas:
-  "Pedido registrado no sistema e seguindo para confirmação/preparo. Você receberá atualizações do status."
-- TEMPO: Sempre informar ${etaTxt}
+- Já sabemos: Nome: ${customer.name} | Envio: ${customer.lastFulfillment} | Pagamento (preferência): ${customer.preferredPayment || "não definido"}
+- Tempo estimado: entrega ${ETA_DELIVERY} | retirada ${ETA_TAKEOUT}
+- Taxa de entrega atual: R$ ${Number(currentFee).toFixed(2)}
+- PROIBIDO FALAR IDs: NUNCA diga os códigos dos produtos (ex: "ID:123") para o cliente na conversa. Esses códigos são estritamente secretos e servem apenas para você preencher o JSON final.
+- PROIBIDO EXPLICAR REGRA DE PREÇO: Se for meio a meio, NÃO diga “cobra o mais caro”/“pelo mais caro”. Apenas informe o TOTAL final.
+- BEBIDAS: Ofereça somente bebidas que existam na lista "BEBIDAS DISPONÍVEIS" abaixo.
+- SABORES GENÉRICOS: Se o cliente pedir "frango" e existir mais de um frango no cardápio, liste as opções (sem IDs) e pergunte qual prefere.
 - 1 pergunta por vez.
+- Se o cliente ainda não escolheu tamanho + sabores, conduza pra isso.
+- Sempre que fizer RESUMO final, peça confirmação: "Posso confirmar?"
 
 ROTEIRO:
-1) Confirme tamanho + sabores (se meio a meio, confirmar os 2 sabores pelo nome exato do cardápio)
-2) Ofereça borda + bebida (quando fizer sentido)
+1) Confirme tamanho + sabores
+2) Ofereça borda + 1 bebida (da lista)
 3) Pergunte observações
 4) Se dinheiro, pergunte troco
 5) Faça resumo e total exato (inclui taxa R$ ${Number(currentFee).toFixed(2)})
-6) Pergunte "Podemos confirmar?" (sem falar de motoboy)
+
+IMPORTANTE SOBRE STATUS:
+- Quando o pedido for criado via integração, ele entra como "aguardando confirmação/preparo".
+- NÃO diga "motoboy a caminho" nem "pedido entregue" nem "já está saindo" após criar.
+- A mensagem certa após criar é: "Pedido registrado no sistema e seguindo para confirmação/preparo. Você receberá atualização de status por aqui."
 
 FINALIZAÇÃO:
 Quando o cliente disser SIM/CONFIRMAR para o resumo, gere um bloco JSON final dentro de \`\`\`json.
@@ -971,19 +1068,15 @@ Formato:
 }
 \`\`\`
 
-PAGAMENTOS DISPONÍVEIS (não mostrar IDs pro cliente):
+PAGAMENTOS DISPONÍVEIS:
 ${pagamentosLoja}
+
+BEBIDAS DISPONÍVEIS (só ofereça essas):
+${beveragesList.length ? beveragesList.map((b) => `- ${b}`).join("\n") : "- (indisponível no momento)"}
 
 ${deliveryInternal}
 
-LISTAS PARA AJUDAR O CLIENTE A ESCOLHER (sem IDs):
-${pizzasHint || ""}
-${sodasHint || ""}
-
-LINK DO CARDÁPIO (se precisar obrigar escolha):
-${LINK_CARDAPIO}
-
-CARDÁPIO (IDs e preços reais - USO INTERNO):
+CARDÁPIO (IDs e preços reais):
 ${menu}
 
 HISTÓRICO:
@@ -997,7 +1090,7 @@ ${historyText}
       resposta = await geminiGenerate(content);
     } catch (e) {
       console.error("❌ Gemini falhou definitivamente:", e?.message || e);
-      await sendText(from, "Estou com muitas mensagens agora 😅 Me diga apenas o *tamanho* e os *sabores* da pizza que quer pedir, por favor. (Menu: " + LINK_CARDAPIO + ")");
+      await sendText(from, "Estou com muitas mensagens agora 😅 Me diga apenas o *tamanho* e os *sabores* da pizza que quer pedir, por favor.\nCardápio: " + LINK_CARDAPIO);
       return;
     }
 
@@ -1033,9 +1126,9 @@ ${historyText}
 
           if (item.options && Array.isArray(item.options)) {
             optionsFormatted = item.options.map(opt => {
-              const optPrice = parseFloat(opt.unit_price) || 0;
+              const optPrice = round2(parseFloat(opt.unit_price) || 0);
               const optQty = parseInt(opt.quantity) || 1;
-              optionsSum += (optPrice * optQty);
+              optionsSum += round2(optPrice * optQty);
               return {
                 name: opt.name,
                 quantity: optQty,
@@ -1045,10 +1138,10 @@ ${historyText}
             });
           }
 
-          const basePrice = parseFloat(item.unit_price) || 0;
+          const basePrice = round2(parseFloat(item.unit_price) || 0);
           const qty = parseInt(item.quantity) || 1;
 
-          const totalPriceItem = (basePrice + optionsSum) * qty;
+          const totalPriceItem = round2((basePrice + optionsSum) * qty);
           sumItems += totalPriceItem;
 
           return {
@@ -1063,8 +1156,8 @@ ${historyText}
         });
       }
 
-      const deliveryFee = customer.lastFulfillment === "entrega" ? Number(currentFee) : 0;
-      const totalCalculado = Number(sumItems) + Number(deliveryFee);
+      const deliveryFee = customer.lastFulfillment === "entrega" ? round2(Number(currentFee)) : 0;
+      const totalCalculado = round2(Number(sumItems) + Number(deliveryFee));
 
       const pmId = parseInt(orderDataFromIA.payment_method_id) || paymentMethodIdPicked || null;
 
@@ -1094,13 +1187,35 @@ ${historyText}
           {
             total: totalCalculado,
             payment_method_id: pmId,
-            change_for: orderDataFromIA.change_for ? parseFloat(orderDataFromIA.change_for) : undefined
+            change_for: orderDataFromIA.change_for ? round2(parseFloat(orderDataFromIA.change_for)) : undefined
           }
         ]
       };
 
       if (finalOrderPayload.order_type === "delivery") {
+        // exige CEP + coords reais (pra não dar 422 / não quebrar PDV)
+        const check = hasValidDeliveryAddressForCW(customer);
+        if (!check.ok) {
+          const needs = [];
+          if (!check.hasCep) needs.push("*CEP* (8 dígitos)");
+          if (!check.hasCoords) needs.push("*localização 📍*");
+          await sendText(from, `Pra concluir a entrega com segurança, preciso de ${needs.join(" e ")}.\nPode me mandar agora?`);
+          return;
+        }
         finalOrderPayload.delivery_address = buildDeliveryAddressObjectFromCustomer(customer, customer.lastAddress);
+      }
+
+      // SEGURANÇA EXTRA: recalcular totais e garantir pagamento = total
+      if (Array.isArray(finalOrderPayload.items)) {
+        finalOrderPayload.items = finalOrderPayload.items.map((it) => {
+          const fixed = { ...it };
+          fixed.total_price = calcItemTotal(fixed);
+          return fixed;
+        });
+      }
+      finalOrderPayload.totals.order_amount = calcOrderAmount(finalOrderPayload);
+      if (Array.isArray(finalOrderPayload.payments) && finalOrderPayload.payments[0]) {
+        finalOrderPayload.payments[0].total = finalOrderPayload.totals.order_amount;
       }
     }
 
@@ -1127,10 +1242,10 @@ ${historyText}
 
           const qrCodeUrl = `https://quickchart.io/qr?size=300&text=${encodeURIComponent(pixData.pixCopiaECola)}`;
           await sendImage(from, qrCodeUrl, "QR Code PIX ✅");
-          await sendText(from, `Copia e Cola:\n${pixData.pixCopiaECola}\n\nAssim que o pagamento cair, o pedido é registrado no sistema e segue para preparo. ✅\n${etaTxt}`);
+          await sendText(from, `✅ Para confirmar, faça o PIX e pronto:\n\n*Copia e Cola:*\n${pixData.pixCopiaECola}\n\nAssim que o pagamento cair, o pedido é enviado ao sistema da loja e entra em preparo. 🍕`);
 
           clearDraft(from);
-          pushHistory(from, "assistant", "[PIX GERADO - AGUARDANDO PAGAMENTO PARA ENVIAR AO SISTEMA]");
+          pushHistory(from, "assistant", "[PIX GERADO - AGUARDANDO PAGAMENTO PARA ENVIAR À LOJA]");
           return;
         }
 
@@ -1145,7 +1260,9 @@ ${historyText}
         await prisma.order.create({
           data: {
             displayId: txid,
-            status: "waiting_confirmation",
+            cwId: cwResp?.id ? String(cwResp.id) : null,
+            cwStatus: String(cwResp?.status || "waiting_confirmation"),
+            status: String(cwResp?.status || "waiting_confirmation"),
             total: finalOrderPayload.totals.order_amount,
             items: "Pedido Dinheiro/Cartao",
             customerId: customer.id
@@ -1154,18 +1271,23 @@ ${historyText}
 
         if (resposta) await sendText(from, resposta);
 
-        // Mensagem correta: sem "motoboy a caminho"
-        await sendText(from,
-          `✅ *Pedido registrado no sistema!* Agora ele segue para confirmação/preparo.\n${etaTxt}\nVocê vai receber atualizações do status por aqui. 🍕`
+        // MENSAGEM CERTA (sem “motoboy a caminho”)
+        const etaMsg = (customer.lastFulfillment === "entrega")
+          ? `⏱️ Tempo estimado de entrega: *${ETA_DELIVERY}*`
+          : `⏱️ Tempo estimado de retirada: *${ETA_TAKEOUT}*`;
+
+        await sendText(
+          from,
+          `✅ Pedido registrado no sistema da loja.\nStatus: *Aguardando confirmação / preparo*.\n${etaMsg}\nVocê vai recebendo as atualizações por aqui.`
         );
 
         clearDraft(from);
-        pushHistory(from, "assistant", `[PEDIDO CRIADO NO SISTEMA] cw_id=${cwResp?.id || "?"} status=${cwResp?.status || "waiting_confirmation"}`);
+        pushHistory(from, "assistant", "[PEDIDO CRIADO NO CARDAPIOWEB - WAITING_CONFIRMATION]");
         return;
 
       } catch (error) {
         console.error("Falha ao enviar pedido para Cardapio Web:", error?.status, error?.data || error);
-        await sendText(from, "Tive um erro ao registrar o seu pedido no sistema 😕 Vou chamar um humano pra confirmar com você agora!");
+        await sendText(from, "Tive um erro ao enviar o pedido pro sistema da loja 😕 Vou chamar um atendente pra confirmar com você agora!");
         await setHandoffOn(from);
         return;
       }
@@ -1182,3 +1304,4 @@ ${historyText}
 });
 
 module.exports = router;
+```0

@@ -1,3 +1,6 @@
+handoff          Boolean   @default(false)
+handoffAt        DateTime?
+
 generator client {
   provider = "prisma-client-js"
 }

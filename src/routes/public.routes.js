@@ -1,4 +1,3 @@
-// src/routes/public.routes.js
 const express = require("express");
 const ENV = require("../config/env");
 const { PrismaClient } = require("@prisma/client");
@@ -9,16 +8,13 @@ const { getUpsellHint } = require("../services/upsell.service");
 const { quoteDeliveryIfPossible, MAX_KM } = require("../services/deliveryQuote.service");
 const { createPixCharge } = require("../services/interPix.service");
 
-// Node 18+ tem fetch global. Se der erro no seu ambiente, descomente:
-// const fetch = (...args) => import("node-fetch").then(({ default: fetch }) => fetch(...args));
-
 const router = express.Router();
 const prisma = new PrismaClient();
 
 const LINK_CARDAPIO = "https://pappipizza.cardapioweb.com";
 
 // ===============================
-// Anti-duplicação (WhatsApp pode reenviar)
+// Anti-duplicação
 // ===============================
 const processedMsgIds = new Set();
 function alreadyProcessed(id) {
@@ -30,7 +26,7 @@ function alreadyProcessed(id) {
 }
 
 // ===============================
-// Memória curta por telefone (últimas 10 falas)
+// Memória curta
 // ===============================
 const chatHistory = new Map();
 function pushHistory(phone, role, text) {
@@ -45,60 +41,14 @@ function getHistoryText(phone) {
 }
 
 // ===============================
-// DISC (detecção leve + tom humano)
-// ===============================
-function detectDISC(historyText, userText) {
-  const t = `${historyText}\n${userText}`.toLowerCase();
-
-  const score = { D: 0, I: 0, S: 0, C: 0 };
-
-  // D: direto / urgência / comando
-  if (/(rápido|agora|urgente|pra ontem|resolve|quero logo|sem enrolar|objetivo|direto)/i.test(t)) score.D += 3;
-  if (/(quanto fica|valor|taxa|preço|total|fechou|manda)/i.test(t)) score.D += 2;
-
-  // I: animado / social / emojis / “top”
-  if (/(kkk|haha|top|show|amei|perfeito|manda aí|bora|😍|😂|🔥|👏)/i.test(t)) score.I += 3;
-  if (/(promo|novidade|qual recomenda|surpreende|capricha)/i.test(t)) score.I += 2;
-
-  // S: calmo / garantia / “tranquilo”
-  if (/(tranquilo|de boa|sem pressa|tanto faz|pode ser|confio|obrigado|valeu)/i.test(t)) score.S += 3;
-  if (/(família|criança|pra todo mundo|clássica)/i.test(t)) score.S += 1;
-
-  // C: detalhista / regras / confirmação / “certinho”
-  if (/(detalhe|certinho|confirma|comprovante|conforme|tamanho|ingrediente|sem|com|meio a meio|observação)/i.test(t)) score.C += 3;
-  if (/(cep|número|bairro|endereço|nota|troco|cartão|pix)/i.test(t)) score.C += 2;
-
-  let best = "S";
-  let bestVal = -1;
-  for (const k of ["D", "I", "S", "C"]) {
-    if (score[k] > bestVal) { bestVal = score[k]; best = k; }
-  }
-  return best; // D | I | S | C
-}
-
-function discToneGuidance(disc) {
-  switch (disc) {
-    case "D":
-      return `Tom: direto, rápido, sem rodeio. Frases curtas. 1 pergunta por vez. Sem emojis em excesso (máx 1).`;
-    case "I":
-      return `Tom: animado e caloroso. Pode usar 1–2 emojis. Sugira 1 recomendação.`;
-    case "C":
-      return `Tom: bem claro e organizado. Confirme detalhes (tamanho, sabores, endereço). Sem “textão”.`;
-    case "S":
-    default:
-      return `Tom: acolhedor e tranquilo. Passe segurança. Pergunte 1 coisa por vez.`;
-  }
-}
-
-// ===============================
-// IA (Gemini) - auto resolve modelo via ListModels
+// IA (Gemini)
 // ===============================
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
 let cachedGeminiModel = null;
 
 async function listGeminiModels() {
   const apiKey = ENV.GEMINI_API_KEY || "";
-  if (!apiKey) throw new Error("GEMINI_API_KEY não configurada.");
+  if (!apiKey) throw new Error("GEMINI_API_KEY não configurada no Render.");
 
   const resp = await fetch(`${GEMINI_API_BASE}/models`, {
     headers: { "x-goog-api-key": apiKey },
@@ -108,6 +58,7 @@ async function listGeminiModels() {
     const txt = await resp.text().catch(() => "");
     throw new Error(`ListModels failed: ${resp.status} ${txt}`);
   }
+
   const data = await resp.json();
   return data.models || [];
 }
@@ -129,6 +80,7 @@ function pickGeminiModel(models) {
     const found = supported.find((m) => m.name === full);
     if (found) return found.name;
   }
+
   return supported[0]?.name || null;
 }
 
@@ -138,7 +90,6 @@ async function ensureGeminiModel() {
   const picked = pickGeminiModel(models);
   if (!picked) throw new Error("Nenhum modelo com generateContent disponível.");
   cachedGeminiModel = picked;
-  console.log("🤖 Gemini model selecionado:", cachedGeminiModel);
   return cachedGeminiModel;
 }
 
@@ -160,25 +111,20 @@ async function geminiGenerate(content) {
   });
 
   const data = await resp.json().catch(() => ({}));
-  if (!resp.ok) throw new Error(`generateContent failed: ${resp.status} ${JSON.stringify(data)}`);
+  if (!resp.ok) throw new Error(`generateContent failed: ${resp.status}`);
 
-  return (
-    data?.candidates?.[0]?.content?.parts?.map((p) => p.text).filter(Boolean).join("") || ""
-  );
+  return data?.candidates?.[0]?.content?.parts?.map((p) => p.text).filter(Boolean).join("") || "";
 }
 
 // ===============================
-// HELPERS (WHATSAPP)
+// HELPERS WHATSAPP
 // ===============================
 function digitsOnly(str) {
   return String(str || "").replace(/\D/g, "");
 }
 
 async function waSend(payload) {
-  if (!ENV.WHATSAPP_TOKEN || !ENV.WHATSAPP_PHONE_NUMBER_ID) {
-    console.error("❌ WHATSAPP_TOKEN ou WHATSAPP_PHONE_NUMBER_ID não configurado.");
-    return;
-  }
+  if (!ENV.WHATSAPP_TOKEN || !ENV.WHATSAPP_PHONE_NUMBER_ID) return;
   const url = `https://graph.facebook.com/v24.0/${ENV.WHATSAPP_PHONE_NUMBER_ID}/messages`;
   await fetch(url, {
     method: "POST",
@@ -201,7 +147,7 @@ async function sendImage(to, imageUrl, caption) {
     messaging_product: "whatsapp",
     to: digitsOnly(to),
     type: "image",
-    image: { link: imageUrl, caption: caption ? String(caption).slice(0, 1000) : undefined },
+    image: { link: imageUrl, caption: caption }
   });
 }
 
@@ -237,63 +183,11 @@ async function askPaymentButtons(to) {
     { id: "PAY_DINHEIRO", title: "💵 Dinheiro" },
   ]);
 }
-function looksLikeAddress(text) {
-  const t = String(text || "").toLowerCase().trim();
-  if (!t) return false;
-
-  // CEP
-  if (extractCep(t)) return true;
-
-  // Palavras que indicam endereço
-  const hasStreetWord = /(rua|r\.|avenida|av\.|travessa|tv\.|alameda|rodovia|estrada|praça|praca|bairro|nº|n\.)/i.test(t);
-
-  // Padrão tipo "Rua X, 123" / "Rua X 123" / contém vírgula e número
-  const hasNumber = /\b\d{1,5}\b/.test(t);
-  const hasCommaNumber = /,?\s*\d{1,5}\b/.test(t);
-
-  // Evita acionar com frases de intenção (pizza/preço/rápido/quanto)
-  const isIntentPhrase = /(pizza|quanto|preço|preco|rápido|rapido|valor|card[aá]pio|menu|promo)/i.test(t);
-
-  if (isIntentPhrase && !hasStreetWord) return false;
-
-  return (hasStreetWord && hasNumber) || (hasCommaNumber && hasStreetWord) || (hasStreetWord && t.length >= 10);
-}
-// ===============================
-// PEDIDO (rascunho) por telefone
-// ===============================
-const orderDraft = new Map(); // phone -> { text, updatedAt }
-
-function getDraft(phone) {
-  return orderDraft.get(phone) || null;
-}
-function setDraft(phone, text) {
-  orderDraft.set(phone, { text: String(text || "").slice(0, 600), updatedAt: Date.now() });
-}
-function clearDraft(phone) {
-  orderDraft.delete(phone);
-}
-
-function looksLikeOrderIntent(text) {
-  const t = String(text || "").toLowerCase().trim();
-  if (!t) return false;
-
-  // intenção de pedir
-  if (/(quero|me vê|manda|pedir|fechar|vou querer)/i.test(t)) return true;
-
-  // termos de pizza / pedido
-  if (/(pizza|calabresa|mussarela|frango|portuguesa|4 queijos|meia|metade|borda|grande|média|media|pequena)/i.test(t))
-    return true;
-
-  // só preço/quanto fica não é pedido ainda
-  if (/(quanto fica|valor|preço|preco|taxa)/i.test(t) && t.length < 25) return false;
-
-  return false;
-}
 
 // ===============================
-// ADDRESS FLOW (GUIADO + CEP + GPS) por telefone
+// ADDRESS FLOW
 // ===============================
-const addressFlow = new Map(); // phone -> { step, street, number, bairro, cep, complemento, pending, delivery }
+const addressFlow = new Map(); 
 
 function getAF(phone) {
   if (!addressFlow.has(phone)) addressFlow.set(phone, { step: null });
@@ -314,6 +208,7 @@ function extractHouseNumber(text) {
 function looksLikeNoComplement(text) {
   return /^(sem|não tem|nao tem)\s*(complemento)?$/i.test(String(text || "").trim());
 }
+
 function buildAddressText(af) {
   const parts = [];
   if (af.street) parts.push(af.street);
@@ -334,26 +229,16 @@ async function quoteAny(addressText) {
 
 async function reverseGeocodeLatLng(lat, lng) {
   if (!ENV.GOOGLE_MAPS_API_KEY) return null;
-
-  const url =
-    `https://maps.googleapis.com/maps/api/geocode/json?` +
-    `latlng=${lat},${lng}` +
-    `&key=${ENV.GOOGLE_MAPS_API_KEY}` +
-    `&language=pt-BR` +
-    `&result_type=street_address|premise|subpremise|route`;
-
+  const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${ENV.GOOGLE_MAPS_API_KEY}&language=pt-BR&result_type=street_address|premise|subpremise|route`;
   const resp = await fetch(url).catch(() => null);
-  if (!resp) return null;
-
-  const data = await resp.json().catch(() => null);
+  const data = await resp?.json().catch(() => null);
   return data?.results?.[0]?.formatted_address || null;
 }
 
 async function askAddressConfirm(to, formatted, delivery) {
   const feeTxt = delivery?.fee != null ? `R$ ${Number(delivery.fee).toFixed(2)}` : "a confirmar";
   const kmTxt = Number.isFinite(delivery?.km) ? `${delivery.km.toFixed(1)} km` : "";
-  const txt = `Confere o endereço? 📍\n*${formatted}*\nTaxa: *${feeTxt}*${kmTxt ? ` | ${kmTxt}` : ""}`;
-
+  const txt = `Achei este endereço 📍:\n*${formatted}*\nTaxa: *${feeTxt}*${kmTxt ? ` | ${kmTxt}` : ""}\n\nEstá certo?`;
   return sendButtons(to, txt, [
     { id: "ADDR_CONFIRM", title: "✅ Confirmar" },
     { id: "ADDR_CORRECT", title: "✏️ Corrigir" },
@@ -361,127 +246,92 @@ async function askAddressConfirm(to, formatted, delivery) {
 }
 
 // ===============================
-// EXTRAÇÃO SIMPLES (nome, envio, pagamento)
+// ÁUDIO
 // ===============================
-function extractNameLight(text) {
-  const t = String(text || "").trim();
-
-  if (/^[A-Za-zÀ-ÿ]+(?:\s+[A-Za-zÀ-ÿ]+){0,2}$/.test(t) && t.length >= 2) {
-    if (/^(sim|nao|não|ok|blz|beleza|oi|ola|olá)$/i.test(t)) return null;
-    return t.slice(0, 60);
-  }
-
-  const m = t.match(
-    /(?:meu nome é|aqui é o|aqui é a|sou o|sou a|me chamo)\s+([A-Za-zÀ-ÿ]+(?:\s+[A-Za-zÀ-ÿ]+){0,2})/i
-  );
-  const name = m?.[1]?.trim();
-  if (!name || name.length < 2) return null;
-  return name.slice(0, 60);
+async function downloadAudio(mediaId) {
+  try {
+    if (!ENV.WHATSAPP_TOKEN) return null;
+    const metaResp = await fetch(`https://graph.facebook.com/v24.0/${mediaId}`, { headers: { Authorization: `Bearer ${ENV.WHATSAPP_TOKEN}` } });
+    const meta = await metaResp.json();
+    if (!meta?.url) return null;
+    const mediaResp = await fetch(meta.url, { headers: { Authorization: `Bearer ${ENV.WHATSAPP_TOKEN}` } });
+    const mimeType = mediaResp.headers.get("content-type") || "audio/ogg";
+    const buffer = await mediaResp.arrayBuffer();
+    return { base64: Buffer.from(buffer).toString("base64"), mimeType };
+  } catch (e) { return null; }
 }
 
-function detectFulfillmentLight(text) {
-  const t = String(text || "").toLowerCase();
-  if (/retirada|retirar|balc[aã]o|vou buscar/i.test(t)) return "retirada";
-  if (/entrega|delivery|entregar/i.test(t)) return "entrega";
-  return null;
-}
-
-function detectPaymentLight(text) {
-  const t = String(text || "").toLowerCase();
-  if (/pix/i.test(t)) return "pix";
-  if (/cart[aã]o|credito|crédito|d[eé]bito/i.test(t)) return "cartao";
-  if (/dinheiro|troco/i.test(t)) return "dinheiro";
-  return null;
-}
-
-// Pergunta nome só 1x por sessão
-const askedName = new Set();
-function shouldAskName(phone, customer) {
-  if (customer?.name) return false;
-  if (askedName.has(phone)) return false;
-  askedName.add(phone);
-  return true;
+async function transcribeAndExtractFromAudio(base64, mimeType) {
+  const PROMPT_AUDIO = `Você é atendente da Pappi Pizza. TRANSCRAVA o áudio e EXTRAIA campos em JSON...`;
+  const parts = [{ text: PROMPT_AUDIO }, { inlineData: { data: base64, mimeType: mimeType || "audio/ogg" } }];
+  const raw = await geminiGenerate(parts);
+  try { return JSON.parse(String(raw || "").replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```$/i, "").trim()); } 
+  catch { return { transcription: String(raw || "").trim() }; }
 }
 
 // ===============================
 // CARDAPIOWEB
 // ===============================
 async function getMenu() {
-  const base = ENV.CARDAPIOWEB_BASE_URL || "https://integracao.cardapioweb.com";
+  const base = ENV.CARDAPIOWEB_BASE_URL || "[https://integracao.cardapioweb.com](https://integracao.cardapioweb.com)";
   const url = `${base}/api/partner/v1/catalog`;
-
   try {
-    const resp = await fetch(url, {
-      headers: { "X-API-KEY": ENV.CARDAPIOWEB_TOKEN, Accept: "application/json" },
-    });
-
+    const resp = await fetch(url, { headers: { "X-API-KEY": ENV.CARDAPIOWEB_TOKEN, Accept: "application/json" } });
     const data = await resp.json();
     if (!data?.categories) return "Cardápio indisponível.";
-
-    let txt = "🍕 MENU PAPPI:\n";
+    let txt = "🍕 MENU PAPPI PIZZA:\n";
     data.categories.forEach((cat) => {
       if (cat?.status === "ACTIVE") {
-        txt += `\n${String(cat.name || "CATEGORIA").toUpperCase()}\n`;
-        (cat.items || []).forEach((i) => {
-          if (i?.status === "ACTIVE") {
-            const price = Number(i.price);
-            const priceTxt = Number.isFinite(price) ? price.toFixed(2) : "0.00";
-            txt += `- ${i.name} (R$ ${priceTxt})\n`;
-          }
-        });
+        txt += `\n${String(cat.name).toUpperCase()}\n`;
+        (cat.items || []).forEach((i) => { if (i?.status === "ACTIVE") txt += `- ${i.name} (R$ ${Number(i.price).toFixed(2)})\n`; });
       }
     });
-
     return txt.trim();
-  } catch (e) {
-    console.error("❌ getMenu erro:", e?.message || e);
-    return "Cardápio indisponível.";
-  }
+  } catch (e) { return "Cardápio indisponível."; }
 }
 
 async function getMerchant() {
-  const base = ENV.CARDAPIOWEB_BASE_URL || "https://integracao.cardapioweb.com";
-  const url = `${base}/api/partner/v1/merchant`;
-
+  const base = ENV.CARDAPIOWEB_BASE_URL || "[https://integracao.cardapioweb.com](https://integracao.cardapioweb.com)";
   try {
-    const resp = await fetch(url, {
-      headers: { "X-API-KEY": ENV.CARDAPIOWEB_TOKEN, Accept: "application/json" },
-    });
+    const resp = await fetch(`${base}/api/partner/v1/merchant`, { headers: { "X-API-KEY": ENV.CARDAPIOWEB_TOKEN, Accept: "application/json" } });
     return await resp.json();
-  } catch (e) {
-    console.error("❌ getMerchant erro:", e?.message || e);
-    return null;
-  }
+  } catch (e) { return null; }
 }
 
 function normalizePayments(merchant) {
-  const raw =
-    merchant?.métodos_de_pagamento ||
-    merchant?.metodos_de_pagamento ||
-    merchant?.payment_methods ||
-    merchant?.payments ||
-    null;
-
-  if (!Array.isArray(raw)) return "PIX, Cartão, Dinheiro";
-
-  const names = raw
-    .filter((p) => p && (p.ativo === true || p.active === true || p.enabled === true || p.status === "ACTIVE"))
-    .map((p) => p?.método_de_pagamento || p?.metodo_de_pagamento || p?.name || p?.method || p?.type)
-    .filter(Boolean);
-
-  return names.length ? names.join(", ") : "PIX, Cartão, Dinheiro";
+  const raw = merchant?.métodos_de_pagamento || merchant?.payment_methods || null;
+  if (!Array.isArray(raw)) return "PIX, Cartão e Dinheiro";
+  const names = raw.filter((p) => p && (p.ativo === true || p.status === "ACTIVE")).map((p) => p.name || p.method);
+  return names.length ? names.join(", ") : "PIX, Cartão e Dinheiro";
 }
 
 function normalizeAddress(merchant) {
-  const addr = merchant?.endereço || merchant?.endereco || merchant?.address || null;
+  const addr = merchant?.endereço || merchant?.address || null;
   if (!addr) return "Campinas-SP";
+  const parts = [addr.rua || addr.street, addr.numero || addr.number, addr.bairro || addr.district].filter(Boolean);
+  return parts.join(", ") || "Campinas-SP";
+}
 
-  const rua = addr?.rua || addr?.street || "";
-  const numero = addr?.número || addr?.numero || addr?.number || "";
-  const bairro = addr?.bairro || addr?.district || "";
-
-  const parts = [rua, numero, bairro].filter(Boolean).join(", ");
-  return parts || "Campinas-SP";
+// ===============================
+// EXTRAÇÃO SIMPLES
+// ===============================
+function extractNameLight(text) {
+  const t = String(text || "").trim();
+  const m = t.match(/(?:meu nome é|aqui é o|aqui é a|sou o|sou a|me chamo)\s+([A-Za-zÀ-ÿ]+(?:\s+[A-Za-zÀ-ÿ]+){0,2})/i); 
+  return m?.[1]?.trim()?.slice(0, 60) || null;
+}
+function detectFulfillmentLight(text) {
+  const t = String(text || "").toLowerCase();
+  if (/retirada|retirar|balc[aã]o|vou buscar/i.test(t)) return "retirada";
+  if (/entrega|delivery|entregar/i.test(t)) return "entrega";
+  return null;
+}
+function detectPaymentLight(text) {
+  const t = String(text || "").toLowerCase();
+  if (/pix/i.test(t)) return "pix";
+  if (/cart[aã]o|credito|d[eé]bito/i.test(t)) return "cartao";
+  if (/dinheiro|troco/i.test(t)) return "dinheiro";
+  return null;
 }
 
 // ===============================
@@ -491,38 +341,30 @@ router.get("/", (req, res) => res.send("Pappi API IA online 🧠✅"));
 router.get("/health", (req, res) => res.json({ ok: true, app: "Pappi Pizza IA" }));
 
 // ===============================
-// WEBHOOK DO BANCO INTER (PIX)
+// WEBHOOK DO BANCO INTER
 // ===============================
 router.post("/webhook/inter", async (req, res) => {
-  res.sendStatus(200);
+    res.sendStatus(200); 
+    const pagamentos = req.body; 
+    if (!pagamentos || !Array.isArray(pagamentos)) return;
 
-  const pagamentos = req.body;
-  if (!pagamentos || !Array.isArray(pagamentos)) return;
-
-  try {
-    for (const pag of pagamentos) {
-      console.log(`💰 PIX RECEBIDO! TXID: ${pag.txid} | Valor: R$ ${pag.valor}`);
-
-      const order = await prisma.order.findFirst({ where: { displayId: pag.txid } });
-      if (!order) continue;
-
-      await prisma.order.update({ where: { id: order.id }, data: { status: "confirmed" } });
-
-      const customer = await prisma.customer.findUnique({ where: { id: order.customerId } });
-      if (customer?.phone) {
-        await sendText(
-          customer.phone,
-          `✅ Pagamento confirmado! Recebemos R$ ${pag.valor}.\nPedido enviado pra cozinha 🍕👨‍🍳`
-        );
-      }
-    }
-  } catch (error) {
-    console.error("🔥 Erro webhook Inter:", error);
-  }
+    try {
+        for (const pag of pagamentos) {
+            console.log(`💰 PIX RECEBIDO! TXID: ${pag.txid} | Valor: R$ ${pag.valor}`);
+            const order = await prisma.order.findFirst({ where: { displayId: pag.txid } }); 
+            if (order) {
+                await prisma.order.update({ where: { id: order.id }, data: { status: "confirmed" } });
+                const customer = await prisma.customer.findUnique({ where: { id: order.customerId } });
+                if (customer) {
+                    await sendText(customer.phone, `✅ *Pagamento Confirmado!* Recebemos o seu PIX de R$ ${pag.valor}.\nA sua pizza já foi enviada para a cozinha! 🍕👨‍🍳`);
+                }
+            }
+        }
+    } catch (error) { console.error("🔥 Erro no webhook do Inter:", error); }
 });
 
 // ===============================
-// WEBHOOK PRINCIPAL (WhatsApp Cloud)
+// WEBHOOK WHATSAPP
 // ===============================
 router.post("/webhook", async (req, res) => {
   res.sendStatus(200);
@@ -537,401 +379,242 @@ router.post("/webhook", async (req, res) => {
     let customer = await prisma.customer.findUnique({ where: { phone: from } }).catch(() => null);
     if (!customer) customer = await prisma.customer.create({ data: { phone: from } });
 
-    // 1) Botões
+    // Botões
     if (msg.type === "interactive") {
       const btnId = msg?.interactive?.button_reply?.id || null;
-
       if (btnId === "FULFILLMENT_ENTREGA" || btnId === "FULFILLMENT_RETIRADA") {
         const v = btnId === "FULFILLMENT_ENTREGA" ? "entrega" : "retirada";
-        customer = await prisma.customer.update({
-          where: { phone: from },
-          data: { lastFulfillment: v, lastInteraction: new Date() },
-        });
+        customer = await prisma.customer.update({ where: { phone: from }, data: { lastFulfillment: v, lastInteraction: new Date() }});
         pushHistory(from, "user", `BOTÃO: ${v}`);
       }
-
       if (btnId === "PAY_PIX" || btnId === "PAY_CARTAO" || btnId === "PAY_DINHEIRO") {
         const v = btnId === "PAY_PIX" ? "pix" : btnId === "PAY_CARTAO" ? "cartao" : "dinheiro";
-        customer = await prisma.customer.update({
-          where: { phone: from },
-          data: { preferredPayment: v, lastInteraction: new Date() },
-        });
+        customer = await prisma.customer.update({ where: { phone: from }, data: { preferredPayment: v, lastInteraction: new Date() }});
         pushHistory(from, "user", `BOTÃO: pagamento ${v}`);
       }
-
       if (btnId === "ADDR_CONFIRM") {
         const af = getAF(from);
-        const formatted = af?.pending?.formatted || null;
-
-        if (formatted) {
-          await prisma.customer.update({
-            where: { phone: from },
-            data: { lastAddress: String(formatted).slice(0, 200), lastInteraction: new Date() },
-          }).catch(() => null);
-
-          pushHistory(from, "user", `ENDEREÇO CONFIRMADO: ${formatted}`);
+        if (af?.pending?.formatted) {
+          customer = await prisma.customer.update({ where: { phone: from }, data: { lastAddress: af.pending.formatted, lastInteraction: new Date() }});
+          pushHistory(from, "user", `ENDEREÇO CONFIRMADO: ${af.pending.formatted}`);
         }
-
         resetAF(from);
-        await sendText(from, "Fechado ✅ Agora me diga seu pedido 🍕");
+        await sendText(from, "Perfeito ✅ Endereço confirmado! Agora me diga seu pedido 🍕");
         return;
       }
-
       if (btnId === "ADDR_CORRECT") {
         resetAF(from);
-        await sendText(from, "Me manda *CEP* ou *Rua + Número + Bairro* (ou sua localização 📍).");
+        customer = await prisma.customer.update({ where: { phone: from }, data: { lastAddress: null }});
+        await sendText(from, "Sem problema 😊 Me mande *Rua e Número* (ou *CEP*) pra eu calcular certinho.");
         return;
       }
-
-      // Botão não reconhecido: segue fluxo normal (sem travar)
     }
 
-    // 2) Entrada (texto ou localização)
+    // Texto, Áudio, Localização
     let userText = "";
+    let extracted = null;
 
-    if (msg.type === "text") {
+    if (msg.type === "audio") {
+      const audio = await downloadAudio(msg.audio?.id);
+      if (audio?.base64) {
+        extracted = await transcribeAndExtractFromAudio(audio.base64, audio.mimeType);
+        userText = `ÁUDIO TRANSCRITO: ${extracted.transcription || ""}`.trim();
+      } else {
+        await sendText(from, "Não consegui ouvir esse áudio 😕");
+        return;
+      }
+    } else if (msg.type === "text") {
       userText = msg.text?.body || "";
-      if (!userText) return;
     } else if (msg.type === "location") {
-      const lat = msg.location?.latitude;
-      const lng = msg.location?.longitude;
-
-      if (!lat || !lng) {
-        await sendText(from, "Não consegui ler sua localização 😕 Manda de novo?");
-        return;
-      }
-
-      if (!customer.lastFulfillment) {
-        customer = await prisma.customer.update({
-          where: { phone: from },
-          data: { lastFulfillment: "entrega", lastInteraction: new Date() },
-        }).catch(() => customer);
-      }
-
-      const formatted = await reverseGeocodeLatLng(lat, lng);
-      if (!formatted) {
-        await sendText(from, "Não achei no mapa 😕 Manda *Rua + Número + Bairro* ou *CEP*.");
-        return;
-      }
-
+      const { latitude, longitude } = msg.location;
+      await prisma.customer.update({ where: { phone: from }, data: { lastInteraction: new Date() }});
+      if (!customer.lastFulfillment) await prisma.customer.update({ where: { phone: from }, data: { lastFulfillment: "entrega" }});
+      
+      const formatted = await reverseGeocodeLatLng(latitude, longitude);
+      if (!formatted) { await sendText(from, "Não consegui achar esse endereço no mapa 😕"); return; }
+      
       const deliveryGPS = await quoteAny(formatted);
-      if (!deliveryGPS?.ok) {
-        await sendText(from, "Quase! Confirma o endereço ou manda *Rua + Número + Bairro* / *CEP*.");
-        return;
-      }
+      if (!deliveryGPS?.ok) { await sendText(from, "Confirma se a localização está certa?"); return; }
 
       const af = getAF(from);
-      af.pending = { formatted, lat, lng };
+      af.pending = { formatted, lat: latitude, lng: longitude };
       af.delivery = deliveryGPS;
-
       await askAddressConfirm(from, formatted, deliveryGPS);
       return;
-    } else if (msg.type === "interactive") {
-      // já tratado acima
-      return;
-    } else {
-      return;
     }
 
-    // 3) Atualiza customer (nome / entrega / pagamento)
-    const nm = extractNameLight(userText);
-    const ff = detectFulfillmentLight(userText);
-    const pay = detectPaymentLight(userText);
+    if (!userText && msg.type !== "interactive") return;
 
-    const dataToUpdate = { lastInteraction: new Date() };
-    if (nm && !customer.name) dataToUpdate.name = nm;
-    if (ff) dataToUpdate.lastFulfillment = ff;
-    if (pay) dataToUpdate.preferredPayment = pay;
-
-    customer = await prisma.customer.update({ where: { phone: from }, data: dataToUpdate }).catch(() => customer);
-    pushHistory(from, "user", userText);
-
-    // 4) Pergunta nome 1x (pra pegar quem só manda "oi/sim")
-    if (
-      shouldAskName(from, customer) &&
-      /^(oi|olá|ola|sim|boa|boa noite|bom dia|boa tarde)$/i.test(userText.trim())
-    ) {
-      await sendText(from, "Pra eu te atender certinho 😊 qual seu nome?");
-      return;
+    if (userText) {
+      const dataToUpdate = {};
+      const nm = extractNameLight(userText);
+      const ff = detectFulfillmentLight(userText);
+      const pay = detectPaymentLight(userText);
+      if (nm && !customer.name) dataToUpdate.name = nm;
+      if (ff) dataToUpdate.lastFulfillment = ff;
+      if (pay) dataToUpdate.preferredPayment = pay;
+      if (Object.keys(dataToUpdate).length) {
+         customer = await prisma.customer.update({ where: { phone: from }, data: dataToUpdate });
+      }
     }
 
-    // 5) Se não escolheu entrega/retirada, pergunta
-    if (!customer.lastFulfillment) {
-      await askFulfillmentButtons(from);
-      return;
+    if (extracted) {
+      const dataToUpdate = {};
+      if (extracted.customer_name && !customer.name) dataToUpdate.name = extracted.customer_name;
+      if (extracted.delivery_or_pickup) dataToUpdate.lastFulfillment = extracted.delivery_or_pickup;
+      if (extracted.payment) dataToUpdate.preferredPayment = extracted.payment;
+      if (Object.keys(dataToUpdate).length) {
+         customer = await prisma.customer.update({ where: { phone: from }, data: dataToUpdate });
+      }
     }
 
-// 6) Captura pedido antes de ficar perguntando tudo (evita loop "quero pizza rápido quanto fica")
-if (!looksLikeAddress(userText)) {
-  if (looksLikeOrderIntent(userText)) {
-    setDraft(from, userText);
-  }
-}
+    if (userText) pushHistory(from, "user", userText);
 
-// Se o cliente ainda NÃO passou pedido, pede o pedido primeiro (sem travar)
-const draft = getDraft(from);
-if (!draft && customer.lastFulfillment && customer.lastFulfillment !== "entrega") {
-  // retirada: pode pedir pedido direto
-  await sendText(from, "Fechado 🙌 Qual pizza você quer? (sabor + tamanho, ou meia a meia)");
-  return;
-}
-if (!draft && customer.lastFulfillment === "entrega" && !customer.lastAddress) {
-  // entrega mas sem pedido ainda
-  await sendText(from, "Top! Qual pizza você quer? (sabor + tamanho). Depois eu pego o endereço pra calcular a taxa 😊");
-  return;
-}
-if (!draft && !customer.lastFulfillment) {
-  // nem pediu nem escolheu entrega/retirada — pede o pedido primeiro
-  await sendText(from, "Fechado 🙌 Qual pizza você quer? (sabor + tamanho, ou meia a meia)");
-  return;
-}
-    // 7) Endereço (só se entrega)
-    let delivery = null;
+    if (!customer.lastFulfillment) { await askFulfillmentButtons(from); return; }
+    if (!customer.preferredPayment) { await askPaymentButtons(from); return; }
+
+    // ==========================================
+    // FLUXO DE ENDEREÇO
+    // ==========================================
+    let deliveryInternal = `ENTREGA (interno): não aplicável`;
+
     if (customer.lastFulfillment === "entrega") {
-      const candidate = customer.lastAddress || userText;
+      const af = getAF(from);
+      const t = msg.type === "text" ? String(userText).trim() : "";
+      
+      if (af.step || extractCep(t)) {
+          const cep = extractCep(t);
+          if (cep) { af.cep = cep; af.step = "ASK_NUMBER"; await sendText(from, "Perfeito ✅ Qual o *número* da casa?"); return; }
 
-      // se ele já tem lastAddress, tenta cotar com ele primeiro
-      delivery = await quoteAny(candidate);
-
-      if (delivery?.ok && delivery.formatted && !customer.lastAddress) {
-        await prisma.customer.update({
-          where: { phone: from },
-          data: { lastAddress: String(delivery.formatted).slice(0, 200) },
-        }).catch(() => null);
+          if (af.step === "ASK_NUMBER") {
+            const n = extractHouseNumber(t);
+            if (!n) { await sendText(from, "Me diz só o *número* da casa 😊"); return; }
+            af.number = n; af.step = "ASK_BAIRRO"; await sendText(from, "Boa! Qual o *bairro*?"); return;
+          }
+          if (af.step === "ASK_BAIRRO") {
+            af.bairro = t.slice(0, 80); af.step = "ASK_COMPLEMENTO"; await sendText(from, "Tem *complemento*? Se não tiver, diga *sem*."); return;
+          }
+          if (af.step === "ASK_COMPLEMENTO") {
+            af.complemento = looksLikeNoComplement(t) ? null : t.slice(0, 120);
+            af.step = null;
+            const full = buildAddressText(af);
+            const d2 = await quoteAny(full);
+            if (!d2?.ok) { await sendText(from, "Quase lá 😅 Pode mandar o endereço completo?"); return; }
+            af.pending = { formatted: d2.formatted };
+            await askAddressConfirm(from, d2.formatted, d2);
+            return;
+          }
       }
 
-      if (delivery?.ok && delivery.within === false) {
-        await sendText(from, `Ainda não entregamos aí (até ${MAX_KM} km). Quer *Retirada*?`);
-        return;
+      let addressCandidate = customer.lastAddress || extracted?.address_text || t;
+      
+      if (addressCandidate && addressCandidate.trim() !== "") {
+          const delivery = await quoteAny(addressCandidate);
+
+          if (delivery?.ok) {
+            if (delivery.formatted && !customer.lastAddress) {
+                customer = await prisma.customer.update({ where: { phone: from }, data: { lastAddress: delivery.formatted } });
+            }
+            if (delivery.within === false) { 
+                await sendText(from, `Ainda não entregamos aí (até ${MAX_KM} km). Pode *retirar no balcão*?`); 
+                return; 
+            }
+            
+            const kmTxt = Number.isFinite(delivery?.km) ? delivery.km.toFixed(1) : "?";
+            const feeTxt = delivery?.fee != null ? Number(delivery.fee).toFixed(2) : "?";
+            deliveryInternal = `ENTREGA (interno): ${kmTxt} km | Taxa: R$ ${feeTxt}`;
+
+          } else {
+            if (!customer.lastAddress && !af.step && t !== "") {
+                const txt = String(extracted?.address_text || t).trim();
+                const num = extractHouseNumber(txt);
+
+                if (!num) {
+                  af.street = txt.slice(0, 120);
+                  af.step = "ASK_NUMBER";
+                  await sendText(from, "Perfeito 🙌 Agora me diga o *número* da casa.\nSe preferir, mande seu *CEP* ou sua *localização 📍*.");
+                  return;
+                }
+
+                af.street = txt.slice(0, 120);
+                af.number = num;
+                af.step = "ASK_BAIRRO";
+                await sendText(from, "Show! Qual é o *bairro*? 😊");
+                return;
+            }
+          }
       }
-
-      if (!delivery?.ok && (looksLikeAddress(userText) || getAF(from).step)) {
-        const af = getAF(from);
-        const t = String(userText || "").trim();
-
-  // ✅ NÃO iniciar fluxo de endereço se não parecer endereço
-  // Ex: "quero pizza rápido quanto fica"
-  if (!looksLikeAddress(t) && af.step == null) {
-    // deixa o cérebro (IA) responder / conduzir pedido
-    // (não retorna aqui se você quiser continuar para a IA no final)
-  } else {
-
-    // CEP -> pergunta número
-    const cep = extractCep(t);
-    if (cep) {
-      af.cep = cep;
-      af.step = "ASK_NUMBER";
-      await sendText(from, "Perfeito ✅ Qual o *número* da casa?");
-      return;
     }
 
-    // Se já está no fluxo guiado
-    if (af.step === "ASK_NUMBER") {
-      const n = extractHouseNumber(t);
-      if (!n) { await sendText(from, "Me diz só o *número* da casa 😊"); return; }
-      af.number = n;
-      af.step = "ASK_BAIRRO";
-      await sendText(from, "Boa! Qual o *bairro*?");
-      return;
-    }
-    if (af.step === "ASK_BAIRRO") {
-      af.bairro = t.slice(0, 80);
-      af.step = "ASK_COMPLEMENTO";
-      await sendText(from, "Tem *complemento*? Se não tiver, diga *sem*.");
-      return;
-    }
-    if (af.step === "ASK_COMPLEMENTO") {
-      af.complemento = looksLikeNoComplement(t) ? null : t.slice(0, 120);
-      af.step = null;
-
-      const full = buildAddressText(af);
-      const d2 = await quoteAny(full);
-      if (!d2?.ok) { await sendText(from, "Quase lá 😅 Manda *Rua + Número + Bairro* certinho?"); return; }
-
-      af.pending = { formatted: d2.formatted };
-      await askAddressConfirm(from, d2.formatted, d2);
-      return;
-    }
-
-    // Começa fluxo guiado se não conseguiu cotar
-    const num = extractHouseNumber(t);
-    if (!num) {
-      af.street = t.slice(0, 120);
-      af.step = "ASK_NUMBER";
-      await sendText(from, "Perfeito 🙌 Agora me diga o *número*.\nSe preferir, mande seu *CEP* ou *localização 📍*.");
-      return;
-    }
-
-    af.street = t.slice(0, 120);
-    af.number = num;
-    af.step = "ASK_BAIRRO";
-    await sendText(from, "Show! Qual é o *bairro*? 😊");
-    return;
-  }
-      // CEP -> pergunta número
-const cep = extractCep(t);
-if (cep) {
-  af.cep = cep;
-  af.step = "ASK_NUMBER";
-  await sendText(from, "Perfeito ✅ Qual o *número* da casa?");
-  return;
-}
-        // Se já está no fluxo guiado
-        if (af.step === "ASK_NUMBER") {
-          const n = extractHouseNumber(t);
-          if (!n) { await sendText(from, "Me diz só o *número* da casa 😊"); return; }
-          af.number = n;
-          af.step = "ASK_BAIRRO";
-          await sendText(from, "Boa! Qual o *bairro*?");
-          return;
-        }
-        if (af.step === "ASK_BAIRRO") {
-          af.bairro = t.slice(0, 80);
-          af.step = "ASK_COMPLEMENTO";
-          await sendText(from, "Tem *complemento*? Se não tiver, diga *sem*.");
-          return;
-        }
-        if (af.step === "ASK_COMPLEMENTO") {
-          af.complemento = looksLikeNoComplement(t) ? null : t.slice(0, 120);
-          af.step = null;
-
-          const full = buildAddressText(af);
-          const d2 = await quoteAny(full);
-          if (!d2?.ok) { await sendText(from, "Quase lá 😅 Manda *Rua + Número + Bairro* certinho?"); return; }
-
-          af.pending = { formatted: d2.formatted };
-          await askAddressConfirm(from, d2.formatted, d2);
-          return;
-        }
-
-        // Começa fluxo guiado se não conseguiu cotar
-        const num = extractHouseNumber(t);
-        if (!num) {
-          af.street = t.slice(0, 120);
-          af.step = "ASK_NUMBER";
-          await sendText(from, "Perfeito 🙌 Agora me diga o *número*.\nSe preferir, mande seu *CEP* ou *localização 📍*.");
-          return;
-        }
-
-        af.street = t.slice(0, 120);
-        af.number = num;
-        af.step = "ASK_BAIRRO";
-        await sendText(from, "Show! Qual é o *bairro*? 😊");
-        return;
-      }
-// 7.9) Se não escolheu pagamento, pergunta (só depois de endereço OK)
-if (!customer.preferredPayment) {
-  await askPaymentButtons(from);
-  return;
-}
-    // 8) Cérebro (IA) com DISC + fala humana
-    const [menu, merchant, configPix] = await Promise.all([
-      getMenu(),
-      getMerchant(),
-      prisma.config.findUnique({ where: { key: "CHAVE_PIX" } }).catch(() => null),
-    ]);
-
+    // Cérebro da IA
+    const [menu, merchant, configPix] = await Promise.all([getMenu(), getMerchant(), prisma.config.findUnique({ where: { key: "CHAVE_PIX" } }).catch(() => null)]);
     const enderecoLoja = normalizeAddress(merchant);
     const pagamentosLoja = normalizePayments(merchant);
     const pixKey = configPix?.value || "19 9 8319 3999";
-
     const mode = getMode({ customer, now: new Date() });
     const RULES = loadRulesFromFiles(mode);
     const historyText = getHistoryText(from);
     const upsell = getUpsellHint({ historyText, userText });
 
-    const disc = detectDISC(historyText, userText);
-    const tone = discToneGuidance(disc);
-
-    const deliveryInternal =
-      customer.lastFulfillment === "entrega" && delivery?.ok
-        ? `ENTREGA (interno): ${delivery.km?.toFixed?.(1) ?? "?"} km | taxa ${delivery.fee ?? "?"}`
-        : `ENTREGA (interno): não aplicável`;
-
     const PROMPT = `
-Você atende como humano da Pappi Pizza (Campinas-SP). Não diga que é robô/IA.
-Fale natural, sem frases repetidas. Nada de “sou um assistente virtual”.
-${tone}
-
+Você é o atendente virtual da Pappi Pizza (Campinas-SP).
+Tom: caloroso, simpático e objetivo.
 REGRAS CRÍTICAS:
-- NUNCA diga: "VIP", "modo", "evento", "interno", "Google", "Maps".
-- Já sabemos:
-  - Nome: ${customer.name || "desconhecido"}
-  - Entrega/Retirada: ${customer.lastFulfillment}
-  - Pagamento: ${customer.preferredPayment}
+- NUNCA diga: "VIP", "modo", "evento", "interno".
+- Já sabemos: Nome: ${customer.name || "?"} | Envio: ${customer.lastFulfillment} | Pagamento: ${customer.preferredPayment}
+- Se o cliente FINALIZAR O PEDIDO e o pagamento for PIX, coloque no final: [GERAR_PIX:valor]. Ex: [GERAR_PIX:57.90]
 
-PIX (IMPORTANTE):
-- Quando o cliente CONFIRMAR que quer finalizar e pagamento for PIX,
-  adicione no FINAL: [GERAR_PIX:valor] (ex: [GERAR_PIX:57.90]).
+ROTEIRO DE ATENDIMENTO OBRIGATÓRIO (Faça UMA pergunta por vez, seguindo a ordem):
+1. IDENTIFICAÇÃO: Se não souber o nome, pergunte. (O endereço e telefone já foram coletados pelos botões).
+2. PEDIDO: Pergunte o tamanho da pizza (tamanhos disponíveis no cardápio) e quais sabores. Pergunte se deseja dividir (meio a meio).
+3. EXTRAS: Ofereça borda recheada, bebida e pergunte se há alguma observação especial na montagem ou na entrega (ex: sem cebola, chamar no interfone).
+4. TROCO: O cliente já escolheu pagar em "${customer.preferredPayment}". SE (e somente se) for "dinheiro", pergunte se precisa de troco.
+5. CONFIRMAÇÃO: Recapitule todo o pedido (sabores, tamanho, borda, bebida, observações). Diga o valor total, o tempo estimado de entrega e peça a confirmação final para enviar à cozinha.
 
-SE ENTREGA:
-- Se faltar endereço, pedir: CEP ou Rua+Número+Bairro ou Localização.
-- Se fora do raio, oferecer retirada.
-
-Sempre termine com 1 pergunta curta.
-
-REGRAS (interno):
-${RULES}
-
-DADOS:
-- Endereço loja: ${enderecoLoja}
+DADOS DA LOJA:
+- Endereço: ${enderecoLoja}
 - Pagamentos: ${pagamentosLoja}
 - PIX: ${pixKey}
 - Cardápio: ${LINK_CARDAPIO}
-
 ${deliveryInternal}
-
 CARDÁPIO:
 ${menu}
-
 HISTÓRICO:
 ${historyText}
-
-UPSELL (no máximo 1):
-${upsell || "NENHUM"}
+UPSELL: ${upsell || "NENHUM"}
 `.trim();
 
-    const content = `${PROMPT}\n\nCliente: ${userText}\nAtendente:`;
+    const content = `${PROMPT}\n\nCliente: ${userText || "(clicou no botão)"}\nAtendente:`;
     let resposta = await geminiGenerate(content);
 
-    // 9) PIX INTERCEPT
+    // PIX INTERCEPT
     const pixMatch = resposta.match(/\[GERAR_PIX:(\d+\.\d{2})\]/);
     if (pixMatch) {
-      const valorTotal = parseFloat(pixMatch[1]);
-      resposta = resposta.replace(pixMatch[0], "").trim();
+        const valorTotal = parseFloat(pixMatch[1]);
+        resposta = resposta.replace(pixMatch[0], "").trim(); 
+        await sendText(from, resposta);
 
-      if (resposta) await sendText(from, resposta);
+        const txid = `PAPPI${Date.now()}`; 
+        const pixData = await createPixCharge(txid, valorTotal, customer.name || "Cliente Pappi");
 
-      const txid = `PAPPI${Date.now()}`;
-      const pixData = await createPixCharge(txid, valorTotal, customer.name || "Cliente Pappi");
-
-      if (pixData?.pixCopiaECola) {
-        await prisma.order.create({
-          data: {
-            displayId: txid,
-            status: "waiting_payment",
-            total: valorTotal,
-            items: "Pedido via WhatsApp",
-            customerId: customer.id,
-          },
-        });
-
-        const qrCodeUrl = `https://quickchart.io/qr?size=300&text=${encodeURIComponent(pixData.pixCopiaECola)}`;
-        await sendImage(from, qrCodeUrl, "QR Code PIX ✅");
-        await sendText(from, `Copia e Cola:\n${pixData.pixCopiaECola}`);
-      } else {
-        await sendText(from, `Não consegui gerar o QR agora 😅\nChave PIX: ${pixKey}`);
-      }
-
-      pushHistory(from, "assistant", resposta || "[PIX GERADO]");
-      return;
+        if (pixData && pixData.pixCopiaECola) {
+            await prisma.order.create({ data: { displayId: txid, status: "waiting_payment", total: valorTotal, items: "Pedido WhatsApp", customerId: customer.id } });
+            const qrCodeUrl = `https://quickchart.io/qr?size=300&text=${encodeURIComponent(pixData.pixCopiaECola)}`;
+            await sendImage(from, qrCodeUrl, "📷 Seu QR Code!");
+            await sendText(from, `Copia e Cola:\n\n${pixData.pixCopiaECola}`);
+        } else {
+            await sendText(from, "Erro no QR Code. Use a chave: 19 9 8319 3999");
+        }
+        pushHistory(from, "assistant", resposta);
+        return;
     }
 
     pushHistory(from, "assistant", resposta);
     await sendText(from, resposta);
+
   } catch (error) {
     console.error("🔥 Erro:", error);
-    await sendText(from, `Deu uma instabilidade 😅\nPede aqui: ${LINK_CARDAPIO}`);
+    await sendText(from, `Tive uma instabilidade 😅\nPeça aqui: ${LINK_CARDAPIO}`);
   }
 });
 

@@ -573,6 +573,130 @@ async function getMenu() {
 }
 
 // ===================================================
+// MATCHER FORTE (texto -> IDs) usando menuCache.raw
+// (resolve "moda" -> "Moda da Casa - Especiais", etc.)
+// ===================================================
+function norm(s) {
+  return String(s || "")
+    .toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function tokenize(s) {
+  const stop = new Set(["a", "o", "os", "as", "de", "da", "do", "das", "dos", "com", "e", "p", "8p", "16p", "pizza"]);
+  return norm(s)
+    .split(" ")
+    .filter(Boolean)
+    .filter(t => t.length >= 2 && !stop.has(t));
+}
+
+// sinônimos do seu negócio (adicione quando quiser)
+const ALIASES = [
+  { re: /\bmoda\b/i, to: "moda da casa" },
+  { re: /\bcalab\b/i, to: "calabresa" },
+  { re: /\bmarguerita\b/i, to: "marguerita" }, // aceita variações
+  { re: /\bfiladelfia\b/i, to: "filadelfia chicken" },
+  { re: /\bcatup\b/i, to: "catupiry" },
+];
+
+function applyAliases(text) {
+  let t = String(text || "");
+  for (const a of ALIASES) t = t.replace(a.re, a.to);
+  return t;
+}
+
+// score por tokens: quanto mais tokens baterem, maior score
+function scoreTokens(targetTokens, candidateTokens) {
+  if (!targetTokens.length) return 0;
+  const set = new Set(candidateTokens);
+  let hit = 0;
+  for (const t of targetTokens) if (set.has(t)) hit++;
+
+  // bônus: se bater o primeiro token (ajuda no "moda")
+  const bonus = targetTokens[0] && set.has(targetTokens[0]) ? 0.25 : 0;
+
+  return (hit / targetTokens.length) + bonus;
+}
+
+function bestMatchByTokens(candidates, queryText, getTextFn) {
+  const q = applyAliases(queryText);
+  const qt = tokenize(q);
+  if (!qt.length) return null;
+
+  let best = null;
+  let bestScore = 0;
+
+  for (const c of candidates) {
+    const candText = getTextFn(c);
+    const ct = tokenize(candText);
+    if (!ct.length) continue;
+
+    const sc = scoreTokens(qt, ct);
+
+    // filtro mínimo pra evitar pegar coisa errada
+    if (sc >= 0.45 && sc > bestScore) {
+      bestScore = sc;
+      best = c;
+    }
+  }
+
+  return best ? { best, score: bestScore } : null;
+}
+
+// acha item (produto) pelo nome
+function findItemByNameSmart(raw, name) {
+  if (!raw?.categories?.length) return null;
+
+  const items = [];
+  for (const c of raw.categories) {
+    if (c?.status !== "ACTIVE") continue;
+    for (const it of (c.items || [])) {
+      if (it?.status !== "ACTIVE") continue;
+      items.push({ cat: c, item: it });
+    }
+  }
+
+  // 1) match exato normalizado
+  const target = norm(applyAliases(name));
+  for (const x of items) {
+    if (norm(x.item.name) === target) return x;
+  }
+
+  // 2) match por tokens (fuzzy)
+  const m = bestMatchByTokens(items, name, (x) => `${x.item.name} ${x.item.description || ""} ${x.cat.name || ""}`);
+  return m?.best || null;
+}
+
+// acha opção dentro de um item (ex: grupo "Escolha até 2 Sabores 8P" / opção "Moda da Casa - Especiais")
+function findOptionSmart(itemFromCatalog, queryOptionText) {
+  const groups = itemFromCatalog?.option_groups || [];
+  const optionsFlat = [];
+
+  for (const g of groups) {
+    if (g?.status !== "ACTIVE") continue;
+    for (const o of (g.options || [])) {
+      if (o?.status !== "ACTIVE") continue;
+      optionsFlat.push({ group: g, opt: o });
+    }
+  }
+
+  if (!optionsFlat.length) return null;
+
+  // 1) exato
+  const target = norm(applyAliases(queryOptionText));
+  for (const x of optionsFlat) {
+    if (norm(x.opt.name) === target) return x;
+  }
+
+  // 2) tokens (fuzzy) -> isso resolve "moda" pra "Moda da Casa - Especiais"
+  const m = bestMatchByTokens(optionsFlat, queryOptionText, (x) => `${x.opt.name} ${x.group.name}`);
+  return m?.best || null;
+}
+
+// ===================================================
 // MATCHER (nome -> IDs) usando o catálogo do CardápioWeb
 // ===================================================
 function norm(s) {

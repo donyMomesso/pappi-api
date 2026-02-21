@@ -493,16 +493,87 @@ function findItemByName(raw, name) {
     }
   }
 
+// ===================================================
+// CACHE DO CARDAPIOWEB (CATÁLOGO)
+// ===================================================
+let menuCache = { data: null, raw: null, timestamp: 0 };
+const CACHE_TTL = 5 * 60 * 1000;
+
+// ✅ AJUSTE: prioriza TOKEN (Render) e usa API_KEY como fallback
+function cwApiKey() { return ENV.CARDAPIOWEB_TOKEN || ENV.CARDAPIOWEB_API_KEY || ""; }
+function cwPartnerKey() { return ENV.CARDAPIOWEB_PARTNER_KEY || ""; }
+
+// Extrai uma lista amigável de bebidas (pra IA só oferecer o que existe)
+function extractBeveragesForPrompt(raw) {
+  try {
+    const cats = raw?.categories || [];
+    const isBeverageCat = (name) =>
+      /bebida|bebidas|refrigerante|refrigerantes|refri|drink|drinks|suco|sucos|água|agua/i.test(String(name || ""));
+    const out = [];
+    for (const c of cats) {
+      if (c?.status !== "ACTIVE") continue;
+      if (!isBeverageCat(c?.name)) continue;
+      for (const it of (c.items || [])) {
+        if (it?.status !== "ACTIVE") continue;
+        out.push(String(it.name || "").trim());
+      }
+    }
+    const uniq = Array.from(new Set(out.filter(Boolean)));
+    return uniq.slice(0, 40);
+  } catch {
+    return [];
+  }
+}
+
+// ===================================================
+// MATCHER (nome -> IDs) usando o catálogo do CardápioWeb
+// ===================================================
+function norm(s) {
+  return String(s || "")
+    .toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function findItemByName(raw, name) {
+  const target = norm(name);
+  if (!raw?.categories?.length || !target) return null;
+
+  // 1) match exato
+  for (const c of raw.categories) {
+    if (c?.status !== "ACTIVE") continue;
+    for (const it of (c.items || [])) {
+      if (it?.status !== "ACTIVE") continue;
+      if (norm(it.name) === target) return it;
+    }
+  }
+
+  // 2) fallback: contém (mais tolerante)
+  for (const c of raw.categories) {
+    if (c?.status !== "ACTIVE") continue;
+    for (const it of (c.items || [])) {
+      if (it?.status !== "ACTIVE") continue;
+      const n = norm(it.name);
+      if (n.includes(target) || target.includes(n)) return it;
+    }
+  }
+
   return null;
 }
 
 // acha o grupo de opção (ex: "Tamanho") e a opção (ex: "Grande")
+// ⚠️ No seu JSON real é "option_groups" (não "options")
 function findOptionInGroup(itemFromCatalog, groupName, optionName) {
   const gName = norm(groupName);
   const oName = norm(optionName);
 
   const groups = itemFromCatalog?.option_groups || [];
-  const group = (groups || []).find((g) => norm(g.name) === gName);
+  const group =
+    (groups || []).find((g) => norm(g.name) === gName) ||
+    (groups || []).find((g) => norm(g.name).includes(gName) || gName.includes(norm(g.name)));
+
   if (!group) return null;
 
   const opts = group.options || [];
@@ -510,6 +581,10 @@ function findOptionInGroup(itemFromCatalog, groupName, optionName) {
   if (!opt) opt = opts.find((o) => norm(o.name).includes(oName) || oName.includes(norm(o.name)));
   return opt || null;
 }
+
+async function getMenu() {
+  if (menuCache.data && Date.now() - menuCache.timestamp < CACHE_TTL) return menuCache.data;
+
   const apiKey = cwApiKey();
   const partnerKey = cwPartnerKey();
 
@@ -519,6 +594,7 @@ function findOptionInGroup(itemFromCatalog, groupName, optionName) {
   }
 
   const base = ENV.CARDAPIOWEB_BASE_URL || "https://integracao.cardapioweb.com";
+
   try {
     const resp = await fetch(`${base}/api/partner/v1/catalog`, {
       headers: {
@@ -532,23 +608,42 @@ function findOptionInGroup(itemFromCatalog, groupName, optionName) {
     if (!data?.categories) return "Cardápio indisponível.";
 
     let txt = "🍕 MENU PAPPI:\n";
+
     data.categories.forEach((cat) => {
-      if (cat?.status === "ACTIVE") {
-        txt += `\n[CATEGORIA: ${String(cat.name || "N/A").toUpperCase()}]\n`;
-        (cat.items || []).forEach((i) => {
-          if (i?.status === "ACTIVE") {
-            const price = Number(i.price);
-            txt += `- ID:${i.id} | ${i.name} | R$ ${Number.isFinite(price) ? price.toFixed(2) : "0.00"}\n`;
-            if (i.options && i.options.length > 0) {
-              i.options.forEach(opt => {
-                if (opt.status === "ACTIVE") {
-                  txt += `  -- Opção ID:${opt.id} | ${opt.name} | R$ ${Number(opt.price).toFixed(2)}\n`;
-                }
-              });
+      if (cat?.status !== "ACTIVE") return;
+
+      txt += `\n[CATEGORIA: ${String(cat.name || "N/A").toUpperCase()}]\n`;
+
+      (cat.items || []).forEach((i) => {
+        if (i?.status !== "ACTIVE") return;
+
+        const price = Number(i.price);
+        txt += `- ID:${i.id} | ${i.name} | R$ ${Number.isFinite(price) ? price.toFixed(2) : "0.00"}\n`;
+
+        // ✅ CORRETO: option_groups -> options
+        const groups = i.option_groups || [];
+        for (const g of groups) {
+          if (g?.status !== "ACTIVE") continue;
+          txt += `  [GRUPO: ${g.name}]\n`;
+
+          for (const opt of (g.options || [])) {
+            if (opt?.status !== "ACTIVE") continue;
+            const p = Number(opt.price);
+            txt += `    -- Opção ID:${opt.id} | ${opt.name} | R$ ${Number.isFinite(p) ? p.toFixed(2) : "0.00"}\n`;
+          }
+        }
+
+        // combos (se quiser visualizar)
+        if (i.kind === "combo" && Array.isArray(i.combo_steps) && i.combo_steps.length) {
+          txt += `  [COMBO]\n`;
+          for (const step of i.combo_steps) {
+            txt += `    -- Etapa: ${step.name} | Preço base: R$ ${Number(step.price || 0).toFixed(2)}\n`;
+            for (const si of (step.combo_step_items || [])) {
+              txt += `       * item_id:${si.item_id} | adicional: R$ ${Number(si.additional_price || 0).toFixed(2)}\n`;
             }
           }
-        });
-      }
+        }
+      });
     });
 
     menuCache = { data: txt.trim(), raw: data, timestamp: Date.now() };
@@ -557,7 +652,7 @@ function findOptionInGroup(itemFromCatalog, groupName, optionName) {
     return "Cardápio indisponível.";
   }
 }
-
+  
 // ===================================================
 // MATCHER (nome -> IDs) usando o catálogo do CardápioWeb
 // ===================================================

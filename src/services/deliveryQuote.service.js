@@ -12,7 +12,6 @@ function hasEnoughAddress(text) {
 }
 
 async function quoteDeliveryIfPossible(addressText) {
-  // Nunca “derruba” atendimento: se falhar, devolve ok:false e a conversa segue.
   if (!ENV.GOOGLE_MAPS_API_KEY) return { ok: false, reason: "NO_KEY" };
   if (!hasEnoughAddress(addressText)) return { ok: false, reason: "INCOMPLETE_ADDRESS" };
 
@@ -31,6 +30,8 @@ async function quoteDeliveryIfPossible(addressText) {
       etaMin: q?.eta_minutes ?? null,
       fee: q?.delivery_fee ?? null,
       formatted: q?.formatted_address || addressText,
+      lat: Number.isFinite(Number(q?.latitude)) ? Number(q.latitude) : null,
+      lng: Number.isFinite(Number(q?.longitude)) ? Number(q.longitude) : null,
       service_limit_km_hint: MAX_KM,
     };
   } catch (e) {

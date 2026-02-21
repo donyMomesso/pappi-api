@@ -12,38 +12,61 @@ function toNumber(v, fallback = null) {
 }
 
 module.exports = {
+  // ===============================
   // Webhook
+  // ===============================
   WEBHOOK_VERIFY_TOKEN,
 
+  // ===============================
   // WhatsApp Cloud API (Meta)
+  // ===============================
   WHATSAPP_TOKEN: process.env.WHATSAPP_TOKEN || "",
   WHATSAPP_PHONE_NUMBER_ID: process.env.WHATSAPP_PHONE_NUMBER_ID || "",
   WHATSAPP_WABA_ID: process.env.WHATSAPP_WABA_ID || "",
 
+  // ===============================
   // Segurança interna
+  // ===============================
   ATTENDANT_API_KEY: process.env.ATTENDANT_API_KEY || "",
 
-  // CardápioWeb (dupla autenticação)
+  // ===============================
+  // CardápioWeb (DUAS CHAVES OBRIGATÓRIAS)
+  // ===============================
   CARDAPIOWEB_BASE_URL:
-    process.env.CARDAPIOWEB_BASE_URL || "https://integracao.cardapioweb.com",
-  CARDAPIOWEB_API_KEY: process.env.CARDAPIOWEB_API_KEY || "",      // <- ADD
-  CARDAPIOWEB_PARTNER_KEY: process.env.CARDAPIOWEB_PARTNER_KEY || "", // <- ADD
-  // se você ainda usa token legado em algum lugar:
+    process.env.CARDAPIOWEB_BASE_URL ||
+    "https://integracao.cardapioweb.com",
+
+  // X-API-KEY (token do estabelecimento)
   CARDAPIOWEB_TOKEN: process.env.CARDAPIOWEB_TOKEN || "",
 
+  // X-PARTNER-KEY (token da integradora)
+  CARDAPIOWEB_PARTNER_KEY:
+    process.env.CARDAPIOWEB_PARTNER_KEY || "",
+
+  // ===============================
   // Google Maps
+  // ===============================
   GOOGLE_MAPS_API_KEY:
-    process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_MAPS_KEY || "",
+    process.env.GOOGLE_MAPS_API_KEY ||
+    process.env.GOOGLE_MAPS_KEY ||
+    "",
 
+  // ===============================
   // Gemini
+  // ===============================
   GEMINI_API_KEY: process.env.GEMINI_API_KEY || "",
-  GEMINI_MODEL: (process.env.GEMINI_MODEL || "gemini-2.5-flash").replace(/^models\//, ""),
+  GEMINI_MODEL: (process.env.GEMINI_MODEL || "gemini-2.5-flash")
+    .replace(/^models\//, ""),
 
+  // ===============================
   // Loja
+  // ===============================
   STORE_LAT: toNumber(process.env.STORE_LAT, null),
   STORE_LNG: toNumber(process.env.STORE_LNG, null),
 
-  // Banco Inter (se você usar em outros arquivos)
+  // ===============================
+  // Banco Inter
+  // ===============================
   INTER_CERT_PATH: process.env.INTER_CERT_PATH || "",
   INTER_KEY_PATH: process.env.INTER_KEY_PATH || "",
   INTER_CA_PATH: process.env.INTER_CA_PATH || "",

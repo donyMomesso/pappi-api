@@ -850,6 +850,40 @@ function hasValidDeliveryAddressForCW(customer) {
 router.get("/", (req, res) => res.send("Pappi API IA online 🧠✅"));
 router.get("/health", (req, res) => res.json({ ok: true, app: "Pappi Pizza IA" }));
 
+router.get("/", (req, res) => {
+  res.send("Pappi API");
+});
+
+router.get("/health", (req, res) => {
+  res.json({ ok: true, app: "Pappi Pizza IA" });
+});
+
+// 👇 COLE AQUI
+router.get("/debug/menu", async (req, res) => {
+  try {
+    if (req.query.refresh === "1") {
+      menuCache = { data: null, raw: null, timestamp: 0 };
+    }
+
+    const menuText = await getMenu();
+    const raw = menuCache.raw;
+
+    return res.json({
+      ok: true,
+      hasRaw: !!raw,
+      categoriesCount: raw?.categories?.length || 0,
+      firstCategory: raw?.categories?.[0]?.name || null,
+      sampleItems: (raw?.categories?.[0]?.items || []).slice(0, 5).map(i => ({
+        id: i.id,
+        name: i.name,
+        price: i.price
+      }))
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e.message) });
+  }
+});
+
 // ===================================================
 // WEBHOOK CARDAPIO WEB (status/pedidos) - evita 404 e pausa
 // ===================================================

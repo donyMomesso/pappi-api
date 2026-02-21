@@ -461,7 +461,55 @@ function extractBeveragesForPrompt(raw) {
 
 async function getMenu() {
   if (menuCache.data && Date.now() - menuCache.timestamp < CACHE_TTL) return menuCache.data;
+function norm(s) {
+  return String(s || "")
+    .toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
+function findItemByName(raw, name) {
+  const target = norm(name);
+  if (!raw?.categories?.length || !target) return null;
+
+  // 1) match exato
+  for (const c of raw.categories) {
+    if (c?.status !== "ACTIVE") continue;
+    for (const it of (c.items || [])) {
+      if (it?.status !== "ACTIVE") continue;
+      if (norm(it.name) === target) return it;
+    }
+  }
+
+  // 2) fallback: contém (mais tolerante)
+  for (const c of raw.categories) {
+    if (c?.status !== "ACTIVE") continue;
+    for (const it of (c.items || [])) {
+      if (it?.status !== "ACTIVE") continue;
+      const n = norm(it.name);
+      if (n.includes(target) || target.includes(n)) return it;
+    }
+  }
+
+  return null;
+}
+
+// acha o grupo de opção (ex: "Tamanho") e a opção (ex: "Grande")
+function findOptionInGroup(itemFromCatalog, groupName, optionName) {
+  const gName = norm(groupName);
+  const oName = norm(optionName);
+
+  const groups = itemFromCatalog?.option_groups || [];
+  const group = (groups || []).find((g) => norm(g.name) === gName);
+  if (!group) return null;
+
+  const opts = group.options || [];
+  let opt = opts.find((o) => norm(o.name) === oName);
+  if (!opt) opt = opts.find((o) => norm(o.name).includes(oName) || oName.includes(norm(o.name)));
+  return opt || null;
+}
   const apiKey = cwApiKey();
   const partnerKey = cwPartnerKey();
 
@@ -508,6 +556,56 @@ async function getMenu() {
   } catch (e) {
     return "Cardápio indisponível.";
   }
+}
+
+// ===================================================
+// MATCHER (nome -> IDs) usando o catálogo do CardápioWeb
+// ===================================================
+function norm(s) {
+  return String(s || "")
+    .toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function findItemByName(raw, name) {
+  const target = norm(name);
+  if (!raw?.categories?.length || !target) return null;
+
+  for (const c of raw.categories) {
+    if (c?.status !== "ACTIVE") continue;
+    for (const it of (c.items || [])) {
+      if (it?.status !== "ACTIVE") continue;
+      if (norm(it.name) === target) return it;
+    }
+  }
+
+  // fallback: contém
+  for (const c of raw.categories) {
+    if (c?.status !== "ACTIVE") continue;
+    for (const it of (c.items || [])) {
+      if (it?.status !== "ACTIVE") continue;
+      if (norm(it.name).includes(target) || target.includes(norm(it.name))) return it;
+    }
+  }
+
+  return null;
+}
+
+function findOptionInGroup(item, groupName, optionName) {
+  const gName = norm(groupName);
+  const oName = norm(optionName);
+  const groups = item?.option_groups || item?.optionGroups || item?.option_groups || item?.option_groups || [];
+
+  const group = (groups || []).find(g => norm(g.name) === gName);
+  if (!group) return null;
+
+  const opts = group.options || [];
+  let opt = opts.find(o => norm(o.name) === oName);
+  if (!opt) opt = opts.find(o => norm(o.name).includes(oName) || oName.includes(norm(o.name)));
+  return opt || null;
 }
 
 // ===================================================

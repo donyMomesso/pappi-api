@@ -611,6 +611,21 @@ router.get("/", (req, res) => res.send("Pappi API IA online 🧠✅"));
 router.get("/health", (req, res) => res.json({ ok: true, app: "Pappi Pizza IA" }));
 
 // ===================================================
+// WEBHOOK CARDAPIO WEB (status/pedidos) - evita 404 e pausa
+// ===================================================
+router.post("/cardapioweb/webhook", async (req, res) => {
+  // Cardápio Web precisa de 200 rápido
+  res.sendStatus(200);
+
+  try {
+    // Só loga por enquanto (depois a gente trata eventos)
+    console.log("📩 CardapioWeb webhook recebido:", JSON.stringify(req.body || {}, null, 2));
+  } catch (e) {
+    console.error("❌ Erro ao processar webhook CardapioWeb:", e);
+  }
+});
+
+// ===================================================
 // WEBHOOK BANCO INTER (PIX)
 // ===================================================
 router.post("/webhook/inter", async (req, res) => {

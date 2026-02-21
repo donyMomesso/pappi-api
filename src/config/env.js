@@ -23,53 +23,39 @@ module.exports = {
   // Segurança interna
   ATTENDANT_API_KEY: process.env.ATTENDANT_API_KEY || "",
 
-  // =========================
-  // CardápioWeb (dupla auth)
-  // =========================
+  // CardápioWeb (⚠️ existem fluxos diferentes: catálogo x pedidos)
   CARDAPIOWEB_BASE_URL:
     process.env.CARDAPIOWEB_BASE_URL || "https://integracao.cardapioweb.com",
 
-  // Tokens da dupla autenticação:
-  // X-API-KEY (do estabelecimento)
-  CARDAPIOWEB_API_KEY: process.env.CARDAPIOWEB_API_KEY || "",
-
-  // X-PARTNER-KEY (da integradora)
-  CARDAPIOWEB_PARTNER_KEY: process.env.CARDAPIOWEB_PARTNER_KEY || "",
-
-  // Compat (token legado, se você ainda usar em algum lugar)
-  CARDAPIOWEB_TOKEN: process.env.CARDAPIOWEB_TOKEN || "",
-
-  // Opcional (se você quiser usar depois)
+  // Pode ser exigido por alguns catálogos
   CARDAPIOWEB_STORE_ID: process.env.CARDAPIOWEB_STORE_ID || "",
 
-  // =========================
+  // Chave da loja (X-API-KEY) — compat com legado CARDAPIOWEB_TOKEN
+  CARDAPIOWEB_API_KEY:
+    process.env.CARDAPIOWEB_API_KEY || process.env.CARDAPIOWEB_TOKEN || "",
+
+  // Chave do integrador (X-PARTNER-KEY) — usada nos endpoints Partner (PDV/pedido)
+  CARDAPIOWEB_PARTNER_KEY: process.env.CARDAPIOWEB_PARTNER_KEY || "",
+
+  // (legado) mantenha para não quebrar imports antigos
+  CARDAPIOWEB_TOKEN: process.env.CARDAPIOWEB_TOKEN || "",
+
   // Google Maps
-  // =========================
   GOOGLE_MAPS_API_KEY:
     process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_MAPS_KEY || "",
 
-  // =========================
   // Gemini
-  // =========================
   GEMINI_API_KEY: process.env.GEMINI_API_KEY || "",
-  GEMINI_MODEL: (process.env.GEMINI_MODEL || "gemini-2.5-flash").replace(
-    /^models\//,
-    ""
-  ),
+  GEMINI_MODEL: (process.env.GEMINI_MODEL || "gemini-2.5-flash").replace(/^models\//, ""),
 
-  // =========================
-  // Loja
-  // =========================
+  // Loja (coordenadas, opcional)
   STORE_LAT: toNumber(process.env.STORE_LAT, null),
   STORE_LNG: toNumber(process.env.STORE_LNG, null),
 
-  // =========================
-  // Banco Inter (mTLS + OAuth)
-  // =========================
+  // Banco Inter
   INTER_CERT_PATH: process.env.INTER_CERT_PATH || "",
   INTER_KEY_PATH: process.env.INTER_KEY_PATH || "",
   INTER_CA_PATH: process.env.INTER_CA_PATH || "",
-
   INTER_CLIENT_ID: process.env.INTER_CLIENT_ID || "",
   INTER_CLIENT_SECRET: process.env.INTER_CLIENT_SECRET || "",
   INTER_CHAVE_PIX: process.env.INTER_CHAVE_PIX || "",

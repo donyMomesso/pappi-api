@@ -1,4 +1,10 @@
+// src/config/env.js
 require("dotenv").config();
+
+const WEBHOOK_VERIFY_TOKEN =
+  process.env.WEBHOOK_VERIFY_TOKEN ||
+  process.env.WEBHOOK_TOKEN ||
+  "";
 
 function toNumber(v, fallback = null) {
   const n = Number(v);
@@ -6,68 +12,43 @@ function toNumber(v, fallback = null) {
 }
 
 module.exports = {
-  // =============================
-  // WEBHOOK
-  // =============================
-  WEBHOOK_VERIFY_TOKEN:
-    process.env.WEBHOOK_VERIFY_TOKEN ||
-    process.env.WEBHOOK_TOKEN ||
-    "",
+  // Webhook
+  WEBHOOK_VERIFY_TOKEN,
 
-  // =============================
-  // WHATSAPP
-  // =============================
+  // WhatsApp Cloud API (Meta)
   WHATSAPP_TOKEN: process.env.WHATSAPP_TOKEN || "",
   WHATSAPP_PHONE_NUMBER_ID: process.env.WHATSAPP_PHONE_NUMBER_ID || "",
   WHATSAPP_WABA_ID: process.env.WHATSAPP_WABA_ID || "",
 
-  // =============================
-  // SEGURANÇA INTERNA
-  // =============================
+  // Segurança interna
   ATTENDANT_API_KEY: process.env.ATTENDANT_API_KEY || "",
 
-  // =============================
-  // CARDÁPIO WEB
-  // =============================
+  // CardápioWeb (dupla autenticação)
   CARDAPIOWEB_BASE_URL:
-    process.env.CARDAPIOWEB_BASE_URL ||
-    "https://integracao.cardapioweb.com",
+    process.env.CARDAPIOWEB_BASE_URL || "https://integracao.cardapioweb.com",
+  CARDAPIOWEB_API_KEY: process.env.CARDAPIOWEB_API_KEY || "",      // <- ADD
+  CARDAPIOWEB_PARTNER_KEY: process.env.CARDAPIOWEB_PARTNER_KEY || "", // <- ADD
+  // se você ainda usa token legado em algum lugar:
   CARDAPIOWEB_TOKEN: process.env.CARDAPIOWEB_TOKEN || "",
-  CARDAPIOWEB_API_KEY: process.env.CARDAPIOWEB_API_KEY || "",
-  CARDAPIOWEB_PARTNER_KEY: process.env.CARDAPIOWEB_PARTNER_KEY || "",
 
-  // =============================
-  // GOOGLE MAPS
-  // =============================
+  // Google Maps
   GOOGLE_MAPS_API_KEY:
-    process.env.GOOGLE_MAPS_API_KEY ||
-    process.env.GOOGLE_MAPS_KEY ||
-    "",
+    process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_MAPS_KEY || "",
 
-  // =============================
-  // GEMINI
-  // =============================
+  // Gemini
   GEMINI_API_KEY: process.env.GEMINI_API_KEY || "",
-  GEMINI_MODEL: (process.env.GEMINI_MODEL || "gemini-2.5-flash").replace(
-    /^models\//,
-    ""
-  ),
+  GEMINI_MODEL: (process.env.GEMINI_MODEL || "gemini-2.5-flash").replace(/^models\//, ""),
 
-  // =============================
-  // BANCO INTER (PIX)
-  // =============================
+  // Loja
+  STORE_LAT: toNumber(process.env.STORE_LAT, null),
+  STORE_LNG: toNumber(process.env.STORE_LNG, null),
+
+  // Banco Inter (se você usar em outros arquivos)
   INTER_CERT_PATH: process.env.INTER_CERT_PATH || "",
   INTER_KEY_PATH: process.env.INTER_KEY_PATH || "",
   INTER_CA_PATH: process.env.INTER_CA_PATH || "",
-
   INTER_CLIENT_ID: process.env.INTER_CLIENT_ID || "",
   INTER_CLIENT_SECRET: process.env.INTER_CLIENT_SECRET || "",
-  INTER_CONTA_CORRENTE: process.env.INTER_CONTA_CORRENTE || "",
   INTER_CHAVE_PIX: process.env.INTER_CHAVE_PIX || "",
-
-  // =============================
-  // LOJA
-  // =============================
-  STORE_LAT: toNumber(process.env.STORE_LAT, null),
-  STORE_LNG: toNumber(process.env.STORE_LNG, null),
+  INTER_CONTA_CORRENTE: process.env.INTER_CONTA_CORRENTE || "",
 };

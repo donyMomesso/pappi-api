@@ -428,7 +428,7 @@ async function geminiGenerate(content) {
   return "";
 }
 
-// ===================================================
+  // ===================================================
 // CACHE DO CARDAPIOWEB (CATÁLOGO)
 // ===================================================
 let menuCache = { data: null, raw: null, timestamp: 0 };
@@ -442,7 +442,8 @@ function cwPartnerKey() { return ENV.CARDAPIOWEB_PARTNER_KEY || ""; }
 function extractBeveragesForPrompt(raw) {
   try {
     const cats = raw?.categories || [];
-    const isBeverageCat = (name) => /bebida|bebidas|refrigerante|refrigerantes|refri|drink|drinks|suco|sucos|água|agua/i.test(String(name || ""));
+    const isBeverageCat = (name) =>
+      /bebida|bebidas|refrigerante|refrigerantes|refri|drink|drinks|suco|sucos|água|agua/i.test(String(name || ""));
     const out = [];
     for (const c of cats) {
       if (c?.status !== "ACTIVE") continue;
@@ -459,8 +460,9 @@ function extractBeveragesForPrompt(raw) {
   }
 }
 
-async function getMenu() {
-  if (menuCache.data && Date.now() - menuCache.timestamp < CACHE_TTL) return menuCache.data;
+// ===================================================
+// MATCHER (nome -> IDs) usando o catálogo do CardápioWeb
+// ===================================================
 function norm(s) {
   return String(s || "")
     .toLowerCase()
@@ -493,35 +495,80 @@ function findItemByName(raw, name) {
     }
   }
 
-// ===================================================
-// CACHE DO CARDAPIOWEB (CATÁLOGO)
-// ===================================================
-let menuCache = { data: null, raw: null, timestamp: 0 };
-const CACHE_TTL = 5 * 60 * 1000;
+  return null;
+}
 
-// ✅ AJUSTE: prioriza TOKEN (Render) e usa API_KEY como fallback
-function cwApiKey() { return ENV.CARDAPIOWEB_TOKEN || ENV.CARDAPIOWEB_API_KEY || ""; }
-function cwPartnerKey() { return ENV.CARDAPIOWEB_PARTNER_KEY || ""; }
+// acha o grupo de opção (ex: "Tamanho") e a opção (ex: "Grande")
+function findOptionInGroup(itemFromCatalog, groupName, optionName) {
+  const gName = norm(groupName);
+  const oName = norm(optionName);
 
-// Extrai uma lista amigável de bebidas (pra IA só oferecer o que existe)
-function extractBeveragesForPrompt(raw) {
+  const groups = itemFromCatalog?.option_groups || [];
+  const group = (groups || []).find((g) => norm(g.name) === gName);
+  if (!group) return null;
+
+  const opts = group.options || [];
+  let opt = opts.find((o) => norm(o.name) === oName);
+  if (!opt) opt = opts.find((o) => norm(o.name).includes(oName) || oName.includes(norm(o.name)));
+  return opt || null;
+}
+
+// ===================================================
+// GET MENU (busca catálogo e monta texto)
+// ===================================================
+async function getMenu() {
+  if (menuCache.data && Date.now() - menuCache.timestamp < CACHE_TTL) return menuCache.data;
+
+  const apiKey = cwApiKey();
+  const partnerKey = cwPartnerKey();
+
+  if (!apiKey || !partnerKey) {
+    menuCache = { data: "Cardápio indisponível.", raw: null, timestamp: Date.now() };
+    return menuCache.data;
+  }
+
+  const base = ENV.CARDAPIOWEB_BASE_URL || "https://integracao.cardapioweb.com";
   try {
-    const cats = raw?.categories || [];
-    const isBeverageCat = (name) =>
-      /bebida|bebidas|refrigerante|refrigerantes|refri|drink|drinks|suco|sucos|água|agua/i.test(String(name || ""));
-    const out = [];
-    for (const c of cats) {
-      if (c?.status !== "ACTIVE") continue;
-      if (!isBeverageCat(c?.name)) continue;
-      for (const it of (c.items || [])) {
-        if (it?.status !== "ACTIVE") continue;
-        out.push(String(it.name || "").trim());
+    const resp = await fetch(`${base}/api/partner/v1/catalog`, {
+      headers: {
+        "X-API-KEY": apiKey,
+        "X-PARTNER-KEY": partnerKey,
+        Accept: "application/json"
       }
-    }
-    const uniq = Array.from(new Set(out.filter(Boolean)));
-    return uniq.slice(0, 40);
-  } catch {
-    return [];
+    });
+
+    const data = await resp.json().catch(() => null);
+    if (!data?.categories) return "Cardápio indisponível.";
+
+    let txt = "🍕 MENU PAPPI:\n";
+    data.categories.forEach((cat) => {
+      if (cat?.status === "ACTIVE") {
+        txt += `\n[CATEGORIA: ${String(cat.name || "N/A").toUpperCase()}]\n`;
+        (cat.items || []).forEach((i) => {
+          if (i?.status === "ACTIVE") {
+            const price = Number(i.price);
+            txt += `- ID:${i.id} | ${i.name} | R$ ${Number.isFinite(price) ? price.toFixed(2) : "0.00"}\n`;
+
+            // ✅ CardápioWeb usa option_groups (não i.options)
+            if (Array.isArray(i.option_groups) && i.option_groups.length > 0) {
+              i.option_groups.forEach((g) => {
+                if (g?.status !== "ACTIVE") return;
+                txt += `  [${g.name}]\n`;
+                (g.options || []).forEach((opt) => {
+                  if (opt?.status !== "ACTIVE") return;
+                  txt += `   -- Opção ID:${opt.id} | ${opt.name} | R$ ${Number(opt.price || 0).toFixed(2)}\n`;
+                });
+              });
+            }
+          }
+        });
+      }
+    });
+
+    menuCache = { data: txt.trim(), raw: data, timestamp: Date.now() };
+    return menuCache.data;
+  } catch (e) {
+    return "Cardápio indisponível.";
   }
 }
 

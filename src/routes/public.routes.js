@@ -434,7 +434,8 @@ async function geminiGenerate(content) {
 let menuCache = { data: null, raw: null, timestamp: 0 };
 const CACHE_TTL = 5 * 60 * 1000;
 
-function cwApiKey() { return ENV.CARDAPIOWEB_API_KEY || ENV.CARDAPIOWEB_TOKEN || ""; }
+// ✅ AJUSTE: prioriza TOKEN (Render) e usa API_KEY como fallback
+function cwApiKey() { return ENV.CARDAPIOWEB_TOKEN || ENV.CARDAPIOWEB_API_KEY || ""; }
 function cwPartnerKey() { return ENV.CARDAPIOWEB_PARTNER_KEY || ""; }
 
 // Extrai uma lista amigável de bebidas (pra IA só oferecer o que existe)
